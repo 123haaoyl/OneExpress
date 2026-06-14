@@ -43,38 +43,6 @@ const defaultStages = [
   { key: "exception", name: "异常", type: "异常", template: "{destination}: Delivery exception, waiting for further processing" },
 ];
 
-const sampleBatches = [
-  {
-    id: makeId(),
-    name: "2026-06-14 澳洲线 A批",
-    count: 1500,
-    destination: "AUSTRALIA",
-    origin: "CHINA",
-    stageKey: "origin",
-    createdAt: "2026-06-14T09:00",
-    numbers: ["AUS2606140001", "AUS2606140002", "AUS2606140003"],
-    events: [
-      makeEvent("origin", "2026-06-14T12:53", "普通", "CHINA: Processed at origin facility", false),
-      makeEvent("info", "2026-06-14T09:05", "普通", "CHINA: Shipment Information Received", true),
-    ],
-  },
-  {
-    id: makeId(),
-    name: "2026-06-12 澳洲线 B批",
-    count: 1000,
-    destination: "AUSTRALIA",
-    origin: "CHINA",
-    stageKey: "flight-departed",
-    createdAt: "2026-06-12T08:30",
-    numbers: ["AUS2606120001", "AUS2606120002"],
-    events: [
-      makeEvent("flight-departed", "2026-06-14T07:30", "普通", "CHINA: Flight departed", false),
-      makeEvent("origin", "2026-06-12T12:31", "普通", "CHINA: Processed at origin facility", true),
-      makeEvent("info", "2026-06-12T09:32", "普通", "CHINA: Shipment Information Received", true),
-    ],
-  },
-];
-
 let state = loadState();
 let selectedBatchId = state.batches[0]?.id ?? null;
 let pendingMerge = null;
@@ -197,7 +165,7 @@ function loadState() {
   if (!saved) {
     return {
       stages: structuredClone(defaultStages),
-      batches: structuredClone(sampleBatches),
+      batches: [],
     };
   }
 
@@ -207,7 +175,7 @@ function loadState() {
   } catch {
     return {
       stages: structuredClone(defaultStages),
-      batches: structuredClone(sampleBatches),
+      batches: [],
     };
   }
 }
@@ -814,15 +782,15 @@ function restoreJson() {
 }
 
 function resetDemo() {
-  if (!confirm("恢复示例数据会覆盖当前浏览器本地数据，确定继续？")) return;
+  if (!confirm("确定清空所有批次、轨迹和单号吗？")) return;
   state = {
     stages: structuredClone(defaultStages),
-    batches: structuredClone(sampleBatches),
+    batches: [],
   };
   selectedBatchId = state.batches[0]?.id ?? null;
   saveState();
   render();
-  showToast("示例数据已恢复");
+  showToast("数据已清空");
 }
 
 function initTheme() {
@@ -920,12 +888,18 @@ async function loadFromCloud(options = {}) {
 
     const rows = await response.json();
     if (!rows.length || !rows[0].payload) {
-      if (!silent) showToast("云端还没有这条记录");
-      updateCloudStatus("云端待初始化", "warn");
+      isApplyingRemote = true;
+      state = normalizeState({});
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      selectedBatchId = null;
+      isApplyingRemote = false;
+      render();
+      updateCloudStatus("云端为空", "ok");
       queueCloudSync();
       return;
     }
 
+    const remoteState = normalizeState(rows[0].payload);
     const remoteVersion = rows[0].updated_at || "";
     if (onlyIfNewer && remoteVersion && remoteVersion === lastCloudVersion) {
       updateCloudStatus("云端已同步", "ok");
@@ -933,7 +907,7 @@ async function loadFromCloud(options = {}) {
     }
 
     isApplyingRemote = true;
-    state = normalizeState(rows[0].payload);
+    state = remoteState;
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
     selectedBatchId = state.batches[0]?.id ?? null;
     lastCloudVersion = remoteVersion;
