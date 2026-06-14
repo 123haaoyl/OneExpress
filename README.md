@@ -11,7 +11,7 @@
 - 轨迹模板维护，支持 `{origin}`、`{destination}`、`{ems}` 变量
 - CSV 导入、推送 CSV 导出
 - JSON 备份 / 恢复
-- Supabase 云数据库同步配置
+- Supabase 无感自动同步
 
 ## 推荐流程
 
@@ -21,18 +21,22 @@
 4. 复制“批量推送内容”到推送系统。推送成功后点击“标记全部已推送”。
 5. 每天下班前在“导入导出”里下载 JSON 备份。
 
-## 云数据库
+## 无感实时同步
 
-“导入导出”页里提供 Supabase 建表 SQL。建表后填写：
+这个版本没有手动同步按钮。打开工具时会自动读取云端数据；你修改批次、轨迹、模板后，会自动上传；其他电脑打开同一份工具会定时拉取云端更新。
 
-- Supabase 项目 URL
-- anon key
-- 表名，默认 `tracking_tool_state`
-- 记录 ID，默认 `main`
+第一次配置：
 
-保存配置后可手动上传 / 读取，也可以勾选自动同步。
+1. 在 Supabase SQL Editor 执行 `supabase-schema.sql`。
+2. 复制 `config.example.js` 为 `config.js`。
+3. 在 `config.js` 填入 Supabase 项目 URL 和 anon key。
+4. 用本地服务或部署后的网页打开 `index.html`。
 
-注意：纯前端页面不能安全保存数据库管理员密钥，因此这里使用 Supabase anon key + RLS 策略。多人账号、权限隔离、操作审计建议后续加登录或后端代理。
+`config.js` 已加入 `.gitignore`，不会被推送到 GitHub。
+
+注意：直接用 `file://` 打开时，部分浏览器可能会限制云端请求。建议用本地静态服务或 GitHub Pages / Netlify 等网页部署方式打开。
+
+纯前端页面不能安全保存数据库管理员密钥，因此这里使用 Supabase anon key + RLS 策略。多人账号、权限隔离、操作审计建议后续加登录或后端代理。
 
 ## 模板变量
 

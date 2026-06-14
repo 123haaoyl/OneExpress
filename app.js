@@ -1,5 +1,4 @@
 const STORAGE_KEY = "batch-tracking-tool-v1";
-const CLOUD_CONFIG_KEY = "batch-tracking-cloud-config-v1";
 const THEME_KEY = "batch-tracking-theme-v1";
 const EMS_PLACEHOLDER = "#ems_number#";
 const CLOUD_SQL = `create table if not exists public.tracking_tool_state (
@@ -80,9 +79,10 @@ let state = loadState();
 let selectedBatchId = state.batches[0]?.id ?? null;
 let pendingMerge = null;
 let draggedBatchId = null;
-let cloudConfig = loadCloudConfig();
+let cloudConfig = null;
 let isApplyingRemote = false;
 let cloudSaveTimer = null;
+let lastCloudVersion = "";
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
@@ -115,11 +115,6 @@ const elements = {
   jsonArea: $("#json-area"),
   themeToggle: $("#theme-toggle"),
   cloudStatus: $("#cloud-status"),
-  cloudUrl: $("#cloud-url"),
-  cloudKey: $("#cloud-key"),
-  cloudTable: $("#cloud-table"),
-  cloudRecordId: $("#cloud-record-id"),
-  cloudAutoSync: $("#cloud-auto-sync"),
   mergeModal: $("#merge-modal"),
   mergeSummary: $("#merge-summary"),
   mergeSourceName: $("#merge-source-name"),
@@ -130,17 +125,28 @@ const elements = {
   toast: $("#toast"),
 };
 
-boot();
+loadOptionalCloudConfig().finally(() => {
+  cloudConfig = loadCloudConfig();
+  boot();
+});
+
+function loadOptionalCloudConfig() {
+  return new Promise((resolve) => {
+    const script = document.createElement("script");
+    script.src = "config.js";
+    script.onload = () => resolve();
+    script.onerror = () => resolve();
+    document.head.append(script);
+  });
+}
 
 function boot() {
   initTheme();
-  fillCloudForm();
-  $("#cloud-sql").textContent = CLOUD_SQL;
   fillStageSelects();
   elements.batchTime.value = toInputDateTime(new Date());
   bindEvents();
   render();
-  updateCloudStatus(cloudConfig.enabled ? "云端已配置" : "本地保存", cloudConfig.enabled ? "ok" : "");
+  startCloudSync();
 }
 
 function bindEvents() {
@@ -174,12 +180,6 @@ function bindEvents() {
   $("#restore-json-btn").addEventListener("click", restoreJson);
   $("#reset-demo-btn").addEventListener("click", resetDemo);
   $("#theme-toggle").addEventListener("click", toggleTheme);
-  $("#sync-now-btn").addEventListener("click", syncToCloudNow);
-  $("#save-cloud-config-btn").addEventListener("click", saveCloudConfigFromForm);
-  $("#cloud-sync-btn").addEventListener("click", syncToCloudNow);
-  $("#cloud-load-btn").addEventListener("click", loadFromCloud);
-  $("#cloud-disconnect-btn").addEventListener("click", clearCloudConfig);
-  $("#copy-sql-btn").addEventListener("click", copyCloudSql);
   $("#cancel-merge-btn").addEventListener("click", closeMergeModal);
   $("#confirm-merge-btn").addEventListener("click", confirmMergeBatches);
   elements.mergeModal.addEventListener("click", (event) => {
@@ -839,62 +839,36 @@ function toggleTheme() {
 }
 
 function loadCloudConfig() {
-  try {
-    const saved = JSON.parse(localStorage.getItem(CLOUD_CONFIG_KEY) || "{}");
-    return {
-      url: saved.url || "",
-      key: saved.key || "",
-      table: saved.table || "tracking_tool_state",
-      recordId: saved.recordId || "main",
-      autoSync: Boolean(saved.autoSync),
-      enabled: Boolean(saved.url && saved.key),
-    };
-  } catch {
-    return {
-      url: "",
-      key: "",
-      table: "tracking_tool_state",
-      recordId: "main",
-      autoSync: false,
-      enabled: false,
-    };
-  }
-}
-
-function fillCloudForm() {
-  elements.cloudUrl.value = cloudConfig.url || "";
-  elements.cloudKey.value = cloudConfig.key || "";
-  elements.cloudTable.value = cloudConfig.table || "tracking_tool_state";
-  elements.cloudRecordId.value = cloudConfig.recordId || "main";
-  elements.cloudAutoSync.checked = Boolean(cloudConfig.autoSync);
-}
-
-function saveCloudConfigFromForm() {
-  cloudConfig = {
-    url: elements.cloudUrl.value.trim().replace(/\/+$/, ""),
-    key: elements.cloudKey.value.trim(),
-    table: elements.cloudTable.value.trim() || "tracking_tool_state",
-    recordId: elements.cloudRecordId.value.trim() || "main",
-    autoSync: elements.cloudAutoSync.checked,
-    enabled: false,
+  const config = window.TRACKING_CLOUD_CONFIG || {};
+  return {
+    url: String(config.url || "").trim().replace(/\/+$/, ""),
+    key: String(config.key || "").trim(),
+    table: String(config.table || "tracking_tool_state").trim(),
+    recordId: String(config.recordId || "main").trim(),
+    pullIntervalMs: Number(config.pullIntervalMs || 15000),
+    enabled: Boolean(config.url && config.key),
   };
-  cloudConfig.enabled = Boolean(cloudConfig.url && cloudConfig.key);
-  localStorage.setItem(CLOUD_CONFIG_KEY, JSON.stringify(cloudConfig));
-  updateCloudStatus(cloudConfig.enabled ? "云端已配置" : "缺少云配置", cloudConfig.enabled ? "ok" : "warn");
-  showToast(cloudConfig.enabled ? "云同步配置已保存" : "请填写 URL 和 anon key");
 }
 
-function clearCloudConfig() {
-  if (!confirm("确定清除云同步配置吗？本地批次数据不会删除。")) return;
-  localStorage.removeItem(CLOUD_CONFIG_KEY);
-  cloudConfig = loadCloudConfig();
-  fillCloudForm();
-  updateCloudStatus("本地保存", "");
-  showToast("云同步配置已清除");
+function startCloudSync() {
+  if (!cloudConfig.enabled) {
+    updateCloudStatus("本地保存", "");
+    return;
+  }
+
+  updateCloudStatus("正在连接云端", "warn");
+  loadFromCloud({ silent: true, confirmOverwrite: false }).finally(() => {
+    queueCloudSync();
+  });
+
+  const interval = Math.max(5000, cloudConfig.pullIntervalMs || 15000);
+  setInterval(() => {
+    loadFromCloud({ silent: true, confirmOverwrite: false, onlyIfNewer: true });
+  }, interval);
 }
 
 function queueCloudSync() {
-  if (isApplyingRemote || !cloudConfig.enabled || !cloudConfig.autoSync) return;
+  if (isApplyingRemote || !cloudConfig.enabled) return;
   clearTimeout(cloudSaveTimer);
   cloudSaveTimer = setTimeout(() => syncToCloudNow(true), 900);
 }
@@ -918,6 +892,7 @@ async function syncToCloudNow(silent = false) {
       throw new Error(await response.text());
     }
 
+    lastCloudVersion = new Date().toISOString();
     updateCloudStatus("云端已同步", "ok");
     if (!silent) showToast("当前数据已上传到云端");
   } catch (error) {
@@ -926,13 +901,14 @@ async function syncToCloudNow(silent = false) {
   }
 }
 
-async function loadFromCloud() {
+async function loadFromCloud(options = {}) {
   if (!ensureCloudConfig()) return;
-  if (!confirm("从云端读取会覆盖当前浏览器本地数据，确定继续？")) return;
+  const { silent = false, confirmOverwrite = false, onlyIfNewer = false } = options;
+  if (confirmOverwrite && !confirm("从云端读取会覆盖当前浏览器本地数据，确定继续？")) return;
 
   updateCloudStatus("正在读取", "warn");
   try {
-    const url = `${cloudConfig.url}/rest/v1/${encodeURIComponent(cloudConfig.table)}?id=eq.${encodeURIComponent(cloudConfig.recordId)}&select=payload`;
+    const url = `${cloudConfig.url}/rest/v1/${encodeURIComponent(cloudConfig.table)}?id=eq.${encodeURIComponent(cloudConfig.recordId)}&select=payload,updated_at`;
     const response = await fetch(url, {
       method: "GET",
       headers: cloudHeaders(),
@@ -944,8 +920,15 @@ async function loadFromCloud() {
 
     const rows = await response.json();
     if (!rows.length || !rows[0].payload) {
-      showToast("云端还没有这条记录");
-      updateCloudStatus("云端无数据", "warn");
+      if (!silent) showToast("云端还没有这条记录");
+      updateCloudStatus("云端待初始化", "warn");
+      queueCloudSync();
+      return;
+    }
+
+    const remoteVersion = rows[0].updated_at || "";
+    if (onlyIfNewer && remoteVersion && remoteVersion === lastCloudVersion) {
+      updateCloudStatus("云端已同步", "ok");
       return;
     }
 
@@ -953,10 +936,11 @@ async function loadFromCloud() {
     state = normalizeState(rows[0].payload);
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
     selectedBatchId = state.batches[0]?.id ?? null;
+    lastCloudVersion = remoteVersion;
     isApplyingRemote = false;
     render();
     updateCloudStatus("已读取云端", "ok");
-    showToast("已从云端恢复数据");
+    if (!silent) showToast("已从云端恢复数据");
   } catch (error) {
     isApplyingRemote = false;
     updateCloudStatus("读取失败", "error");
@@ -966,13 +950,7 @@ async function loadFromCloud() {
 
 function ensureCloudConfig() {
   if (!cloudConfig.enabled) {
-    saveCloudConfigFromForm();
-  }
-
-  if (!cloudConfig.enabled) {
-    updateCloudStatus("缺少云配置", "warn");
-    showToast("请先填写并保存 Supabase URL 和 anon key");
-    switchView("export");
+    updateCloudStatus("本地保存", "");
     return false;
   }
   return true;
@@ -992,13 +970,6 @@ function updateCloudStatus(text, tone = "") {
   elements.cloudStatus.textContent = text;
   elements.cloudStatus.classList.remove("ok", "warn", "error");
   if (tone) elements.cloudStatus.classList.add(tone);
-}
-
-function copyCloudSql() {
-  navigator.clipboard.writeText(CLOUD_SQL).then(
-    () => showToast("建表SQL已复制"),
-    () => showToast("复制失败，请手动复制")
-  );
 }
 
 function switchView(viewName) {

@@ -81,7 +81,6 @@
           <div class="toolbar">
             <button class="secondary-button theme-toggle" id="theme-toggle" type="button">深色</button>
             <span class="sync-pill" id="cloud-status">本地保存</span>
-            <button class="secondary-button" id="sync-now-btn" type="button">同步到云</button>
             <label class="search-box">
               <span>⌕</span>
               <input id="search-input" type="search" placeholder="搜索批次、单号、状态" />
@@ -209,70 +208,6 @@
               </div>
               <textarea id="json-area" rows="12" placeholder="粘贴 JSON 后点恢复"></textarea>
               <button class="danger-button" id="restore-json-btn" type="button">恢复JSON</button>
-            </section>
-            <section class="panel cloud-panel">
-              <h2>云数据库同步</h2>
-              <p class="muted">支持 Supabase 云数据库。先在 Supabase 建表，再填写项目 URL 和 anon key。</p>
-              <div class="sql-box">
-                <button class="mini-button" id="copy-sql-btn" type="button">复制建表SQL</button>
-                <pre id="cloud-sql">create table if not exists public.tracking_tool_state (
-  id text primary key,
-  payload jsonb not null,
-  updated_at timestamptz not null default now()
-);
-
-alter table public.tracking_tool_state enable row level security;
-
-grant select, insert, update on public.tracking_tool_state to anon;
-grant select, insert, update on public.tracking_tool_state to authenticated;
-
-drop policy if exists "tracking_tool_state_read" on public.tracking_tool_state;
-drop policy if exists "tracking_tool_state_insert" on public.tracking_tool_state;
-drop policy if exists "tracking_tool_state_update" on public.tracking_tool_state;
-
-create policy "tracking_tool_state_read"
-on public.tracking_tool_state for select
-using (true);
-
-create policy "tracking_tool_state_insert"
-on public.tracking_tool_state for insert
-with check (true);
-
-create policy "tracking_tool_state_update"
-on public.tracking_tool_state for update
-using (true)
-with check (true);</pre>
-              </div>
-              <div class="cloud-form">
-                <label>
-                  Supabase 项目 URL
-                  <input id="cloud-url" type="url" placeholder="https://xxxx.supabase.co" />
-                </label>
-                <label>
-                  anon key
-                  <input id="cloud-key" type="password" placeholder="eyJ..." autocomplete="off" />
-                </label>
-                <div class="two-cols">
-                  <label>
-                    表名
-                    <input id="cloud-table" type="text" value="tracking_tool_state" />
-                  </label>
-                  <label>
-                    记录ID
-                    <input id="cloud-record-id" type="text" value="main" />
-                  </label>
-                </div>
-                <label class="check-row">
-                  <input id="cloud-auto-sync" type="checkbox" />
-                  <span>本地修改后自动同步到云端</span>
-                </label>
-                <div class="backup-actions">
-                  <button class="primary-button" id="save-cloud-config-btn" type="button">保存配置</button>
-                  <button class="secondary-button" id="cloud-sync-btn" type="button">上传当前数据</button>
-                  <button class="secondary-button" id="cloud-load-btn" type="button">从云端读取</button>
-                  <button class="danger-button" id="cloud-disconnect-btn" type="button">清除配置</button>
-                </div>
-              </div>
             </section>
           </div>
         </section>
