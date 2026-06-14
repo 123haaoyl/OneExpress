@@ -113,6 +113,7 @@ function loadOptionalCloudConfig() {
 function boot() {
   initTheme();
   fillStageSelects();
+  updateBatchCountFromNumbers();
   elements.batchTime.value = toInputDateTime(new Date());
   bindEvents();
   render();
@@ -122,9 +123,10 @@ function boot() {
 function bindEvents() {
   elements.batchForm.addEventListener("submit", addBatch);
   elements.searchInput.addEventListener("input", renderBatchList);
+  elements.batchNumbers.addEventListener("input", updateBatchCountFromNumbers);
   elements.batchStage.addEventListener("change", () => {
     const stage = getStage(elements.batchStage.value);
-    elements.batchDestination.value ||= "AUSTRALIA";
+    elements.batchDestination.value ||= "US";
     elements.batchTime.value ||= toInputDateTime(new Date());
     if (stage) {
       showToast(`默认模板：${stage.template}`);
@@ -434,22 +436,29 @@ function renderSafety() {
 function addBatch(event) {
   event.preventDefault();
   const stage = getStage(elements.batchStage.value);
+  const numbers = parseLines(elements.batchNumbers.value);
+  if (!numbers.length) {
+    showToast("请先输入单号 / 转运号，票数会自动计算");
+    elements.batchNumbers.focus();
+    return;
+  }
+
   const batch = {
     id: makeId(),
     name: elements.batchName.value.trim(),
-    count: Number(elements.batchCount.value || 0),
-    destination: cleanUpper(elements.batchDestination.value || "AUSTRALIA"),
+    count: numbers.length,
+    destination: cleanUpper(elements.batchDestination.value || "US"),
     origin: "CHINA",
     stageKey: elements.batchStage.value,
     createdAt: elements.batchTime.value,
-    numbers: parseLines(elements.batchNumbers.value),
+    numbers,
     events: [
       makeEvent(
         elements.batchStage.value,
         elements.batchTime.value,
         stage?.type ?? "普通",
         renderTemplate(stage?.template ?? "", {
-          destination: cleanUpper(elements.batchDestination.value || "AUSTRALIA"),
+          destination: cleanUpper(elements.batchDestination.value || "US"),
           origin: "CHINA",
         }),
         false
@@ -461,11 +470,15 @@ function addBatch(event) {
   selectedBatchId = batch.id;
   saveState();
   elements.batchForm.reset();
-  elements.batchCount.value = 1500;
-  elements.batchDestination.value = "AUSTRALIA";
+  elements.batchCount.value = 0;
+  elements.batchDestination.value = "US";
   elements.batchTime.value = toInputDateTime(new Date());
   render();
   showToast("批次已保存");
+}
+
+function updateBatchCountFromNumbers() {
+  elements.batchCount.value = parseLines(elements.batchNumbers.value).length;
 }
 
 function addEventToSelectedBatch() {
@@ -531,9 +544,7 @@ function saveDetailNumbers() {
   if (!batch) return;
 
   batch.numbers = parseLines(elements.detailNumbers.value);
-  if (!batch.count || batch.count < batch.numbers.length) {
-    batch.count = batch.numbers.length;
-  }
+  batch.count = batch.numbers.length;
   saveState();
   render();
   showToast("单号已保存");
@@ -778,7 +789,7 @@ function importCsv() {
     .map((row) => {
       const name = getCell(row, ["批次名称", "批次", "batch"], 0).trim();
       const count = Number(getCell(row, ["票数", "数量", "count"], 1)) || 0;
-      const destination = cleanUpper(getCell(row, ["目的地", "国家", "destination"], 2) || "AUSTRALIA");
+      const destination = cleanUpper(getCell(row, ["目的地", "国家", "destination"], 2) || "US");
       const stageName = getCell(row, ["当前节点", "状态", "stage"], 3).trim();
       const stage = findStageByName(stageName) || state.stages[0];
       const time = normalizeInputTime(getCell(row, ["时间", "节点时间", "time"], 4)) || toInputDateTime(new Date());
@@ -786,7 +797,7 @@ function importCsv() {
       return {
         id: makeId(),
         name: name || `导入批次 ${new Date().toLocaleString("zh-CN")}`,
-        count: count || numbers.length,
+        count: numbers.length || count,
         destination,
         origin: "CHINA",
         stageKey: stage.key,
@@ -1117,7 +1128,7 @@ function downloadBackup(backupId) {
 function renderTemplate(template, batch) {
   return String(template)
     .replaceAll("{origin}", batch.origin || "CHINA")
-    .replaceAll("{destination}", batch.destination || "AUSTRALIA")
+    .replaceAll("{destination}", batch.destination || "US")
     .replaceAll("{ems}", EMS_PLACEHOLDER);
 }
 
@@ -1168,8 +1179,8 @@ function newestTime(batch) {
 
 function parseLines(text) {
   return text
-    .split(/\r?\n|,|，/)
-    .map((line) => line.trim())
+    .split(/[\r\n,，;；\t]+/)
+    .map((line) => line.trim().replace(/\s+/g, " "))
     .filter(Boolean);
 }
 
