@@ -614,6 +614,52 @@ textarea:focus {
   grid-column: 1 / -1;
 }
 
+.safety-panel {
+  grid-column: 1 / -1;
+}
+
+.safety-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-top: 14px;
+}
+
+.safety-grid h3 {
+  margin: 0 0 10px;
+  font-size: 15px;
+}
+
+.safety-list {
+  display: grid;
+  gap: 10px;
+}
+
+.safety-item {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.safety-item strong {
+  display: block;
+}
+
+.safety-item p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.safety-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .cloud-form {
   display: grid;
   gap: 12px;
@@ -800,11 +846,13 @@ textarea:focus {
   .detail-actions,
   .backup-actions,
   .merge-preview,
-  .modal-actions {
+  .modal-actions,
+  .safety-grid {
     flex-wrap: wrap;
   }
 
-  .merge-preview {
+  .merge-preview,
+  .safety-grid {
     grid-template-columns: 1fr;
   }
 }

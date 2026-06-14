@@ -117,7 +117,7 @@
                   </div>
                   <div class="detail-actions">
                     <button class="secondary-button" id="duplicate-batch-btn" type="button">复制批次</button>
-                    <button class="danger-button" id="delete-batch-btn" type="button">删除</button>
+                    <button class="danger-button" id="delete-batch-btn" type="button">移入回收站</button>
                   </div>
                 </div>
 
@@ -201,13 +201,32 @@
             </section>
             <section class="panel">
               <h2>备份 / 恢复</h2>
-              <p class="muted">JSON 备份包含批次、轨迹、模板，适合每天收工保存一份。</p>
+              <p class="muted">系统会在删除、清空、恢复前自动留快照；也可以手动导出 JSON。</p>
               <div class="backup-actions">
                 <button class="secondary-button" id="download-json-btn" type="button">下载JSON备份</button>
                 <button class="secondary-button" id="copy-json-btn" type="button">复制JSON</button>
               </div>
               <textarea id="json-area" rows="12" placeholder="粘贴 JSON 后点恢复"></textarea>
               <button class="danger-button" id="restore-json-btn" type="button">恢复JSON</button>
+            </section>
+            <section class="panel safety-panel">
+              <div class="section-heading">
+                <div>
+                  <h2>回收站 / 自动快照</h2>
+                  <p>误删批次可以恢复，危险操作前会自动保留最近 20 份快照。</p>
+                </div>
+                <button class="secondary-button" id="create-backup-btn" type="button">手动快照</button>
+              </div>
+              <div class="safety-grid">
+                <div>
+                  <h3>回收站</h3>
+                  <div id="trash-list" class="safety-list"></div>
+                </div>
+                <div>
+                  <h3>自动快照</h3>
+                  <div id="backup-list" class="safety-list"></div>
+                </div>
+              </div>
             </section>
           </div>
         </section>

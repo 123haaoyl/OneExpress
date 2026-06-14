@@ -81,6 +81,8 @@ const elements = {
   templateList: $("#template-list"),
   importArea: $("#import-area"),
   jsonArea: $("#json-area"),
+  trashList: $("#trash-list"),
+  backupList: $("#backup-list"),
   themeToggle: $("#theme-toggle"),
   cloudStatus: $("#cloud-status"),
   mergeModal: $("#merge-modal"),
@@ -147,6 +149,12 @@ function bindEvents() {
   $("#copy-json-btn").addEventListener("click", copyJson);
   $("#restore-json-btn").addEventListener("click", restoreJson);
   $("#reset-demo-btn").addEventListener("click", resetDemo);
+  $("#create-backup-btn").addEventListener("click", () => {
+    createBackup("手动快照");
+    saveState();
+    render();
+    showToast("快照已保存");
+  });
   $("#theme-toggle").addEventListener("click", toggleTheme);
   $("#cancel-merge-btn").addEventListener("click", closeMergeModal);
   $("#confirm-merge-btn").addEventListener("click", confirmMergeBatches);
@@ -163,20 +171,20 @@ function bindEvents() {
 function loadState() {
   const saved = localStorage.getItem(STORAGE_KEY);
   if (!saved) {
-    return {
+    return normalizeState({
       stages: structuredClone(defaultStages),
       batches: [],
-    };
+    });
   }
 
   try {
     const parsed = JSON.parse(saved);
     return normalizeState(parsed);
   } catch {
-    return {
+    return normalizeState({
       stages: structuredClone(defaultStages),
       batches: [],
-    };
+    });
   }
 }
 
@@ -191,6 +199,7 @@ function render() {
   renderBatchList();
   renderDetail();
   renderTemplates();
+  renderSafety();
 }
 
 function fillStageSelects() {
@@ -368,6 +377,60 @@ function renderTemplates() {
   });
 }
 
+function renderSafety() {
+  if (!elements.trashList || !elements.backupList) return;
+
+  state = normalizeState(state);
+  const trashedBatches = state.trash.batches || [];
+  elements.trashList.innerHTML = trashedBatches.length
+    ? trashedBatches
+        .map(
+          (item) => `
+          <article class="safety-item">
+            <div>
+              <strong>${escapeHtml(item.data.name)}</strong>
+              <p>${Number(item.data.count || 0).toLocaleString("zh-CN")} 票 · 删除于 ${formatDisplayTime(item.deletedAt)}</p>
+            </div>
+            <div class="safety-actions">
+              <button class="mini-button" type="button" data-action="restore-batch" data-trash-id="${escapeAttr(item.id)}">恢复</button>
+            </div>
+          </article>
+        `
+        )
+        .join("")
+    : `<div class="empty-state"><p>回收站为空</p></div>`;
+
+  const backups = state.backups || [];
+  elements.backupList.innerHTML = backups.length
+    ? backups
+        .map(
+          (backup) => `
+          <article class="safety-item">
+            <div>
+              <strong>${escapeHtml(backup.reason)}</strong>
+              <p>${formatDisplayTime(backup.createdAt)} · ${backup.snapshot.batches.length} 个批次</p>
+            </div>
+            <div class="safety-actions">
+              <button class="mini-button" type="button" data-action="restore-backup" data-backup-id="${escapeAttr(backup.id)}">恢复快照</button>
+              <button class="mini-button" type="button" data-action="download-backup" data-backup-id="${escapeAttr(backup.id)}">下载</button>
+            </div>
+          </article>
+        `
+        )
+        .join("")
+    : `<div class="empty-state"><p>暂无快照</p></div>`;
+
+  elements.trashList.querySelectorAll("[data-action='restore-batch']").forEach((button) => {
+    button.addEventListener("click", () => restoreTrashedBatch(button.dataset.trashId));
+  });
+  elements.backupList.querySelectorAll("[data-action='restore-backup']").forEach((button) => {
+    button.addEventListener("click", () => restoreBackup(button.dataset.backupId));
+  });
+  elements.backupList.querySelectorAll("[data-action='download-backup']").forEach((button) => {
+    button.addEventListener("click", () => downloadBackup(button.dataset.backupId));
+  });
+}
+
 function addBatch(event) {
   event.preventDefault();
   const stage = getStage(elements.batchStage.value);
@@ -480,12 +543,18 @@ function deleteSelectedBatch() {
   const batch = getSelectedBatch();
   if (!batch) return;
 
-  if (!confirm(`确定删除「${batch.name}」吗？`)) return;
+  if (!confirm(`确定把「${batch.name}」移入回收站吗？可在“导入导出 > 回收站”恢复。`)) return;
+  createBackup(`移入回收站前：${batch.name}`);
+  state.trash.batches.unshift({
+    id: makeId(),
+    deletedAt: toInputDateTime(new Date()),
+    data: structuredClone(batch),
+  });
   state.batches = state.batches.filter((item) => item.id !== batch.id);
   selectedBatchId = state.batches[0]?.id ?? null;
   saveState();
   render();
-  showToast("批次已删除");
+  showToast("批次已移入回收站");
 }
 
 function duplicateSelectedBatch() {
@@ -607,6 +676,7 @@ function confirmMergeBatches() {
     return;
   }
 
+  createBackup(`合并批次前：${source.name} -> ${target.name}`);
   target.count = Number(target.count || 0) + Number(source.count || 0);
   target.numbers = uniqueValues([...target.numbers, ...source.numbers]);
   target.events = uniqueEvents([...target.events, ...source.events]);
@@ -640,9 +710,11 @@ function removeEvent(batchId, eventId) {
   const batch = state.batches.find((item) => item.id === batchId);
   if (!batch) return;
 
+  createBackup(`删除轨迹前：${batch.name}`);
   batch.events = batch.events.filter((event) => event.id !== eventId);
   saveState();
   render();
+  showToast("轨迹已删除，已自动留快照");
 }
 
 function updateTemplate(stageKey, field, value) {
@@ -724,6 +796,7 @@ function importCsv() {
       };
     });
 
+  createBackup(`CSV 导入前：${imported.length} 个批次`);
   state.batches = [...imported, ...state.batches];
   selectedBatchId = imported[0]?.id ?? selectedBatchId;
   saveState();
@@ -768,10 +841,12 @@ function copyJson() {
 function restoreJson() {
   try {
     const parsed = JSON.parse(elements.jsonArea.value);
-    if (!Array.isArray(parsed.batches) || !Array.isArray(parsed.stages)) {
+    const parsedState = normalizeState(parsed);
+    if (!Array.isArray(parsedState.batches) || !Array.isArray(parsedState.stages)) {
       throw new Error("invalid");
     }
-    state = parsed;
+    createBackup("JSON 恢复前");
+    state = parsedState;
     selectedBatchId = state.batches[0]?.id ?? null;
     saveState();
     render();
@@ -783,9 +858,12 @@ function restoreJson() {
 
 function resetDemo() {
   if (!confirm("确定清空所有批次、轨迹和单号吗？")) return;
+  createBackup("清空全部数据前");
   state = {
     stages: structuredClone(defaultStages),
     batches: [],
+    trash: state.trash,
+    backups: state.backups,
   };
   selectedBatchId = state.batches[0]?.id ?? null;
   saveState();
@@ -974,7 +1052,66 @@ function normalizeState(value) {
   return {
     stages: Array.isArray(value?.stages) && value.stages.length ? value.stages : structuredClone(defaultStages),
     batches: Array.isArray(value?.batches) ? value.batches : [],
+    trash: {
+      batches: Array.isArray(value?.trash?.batches) ? value.trash.batches : [],
+    },
+    backups: Array.isArray(value?.backups) ? value.backups : [],
   };
+}
+
+function createBackup(reason) {
+  state.backups ||= [];
+  const snapshot = {
+    stages: structuredClone(state.stages),
+    batches: structuredClone(state.batches),
+    trash: structuredClone(state.trash || { batches: [] }),
+  };
+  state.backups.unshift({
+    id: makeId(),
+    reason,
+    createdAt: toInputDateTime(new Date()),
+    snapshot,
+  });
+  state.backups = state.backups.slice(0, 20);
+}
+
+function restoreTrashedBatch(trashId) {
+  const item = state.trash.batches.find((entry) => entry.id === trashId);
+  if (!item) return;
+
+  createBackup(`恢复回收站批次前：${item.data.name}`);
+  const restored = structuredClone(item.data);
+  restored.id = state.batches.some((batch) => batch.id === restored.id) ? makeId() : restored.id;
+  state.batches.unshift(restored);
+  state.trash.batches = state.trash.batches.filter((entry) => entry.id !== trashId);
+  selectedBatchId = restored.id;
+  saveState();
+  render();
+  showToast("批次已恢复");
+}
+
+function restoreBackup(backupId) {
+  const backup = state.backups.find((item) => item.id === backupId);
+  if (!backup) return;
+  if (!confirm(`确定恢复「${backup.reason}」这份快照吗？当前状态会先自动再留一份快照。`)) return;
+
+  createBackup("恢复快照前");
+  const currentBackups = state.backups;
+  state = normalizeState({
+    ...backup.snapshot,
+    backups: currentBackups,
+  });
+  selectedBatchId = state.batches[0]?.id ?? null;
+  saveState();
+  render();
+  showToast("快照已恢复");
+}
+
+function downloadBackup(backupId) {
+  const backup = state.backups.find((item) => item.id === backupId);
+  if (!backup) return;
+
+  downloadFile(`自动快照_${fileDate()}.json`, JSON.stringify(backup.snapshot, null, 2), "application/json;charset=utf-8");
 }
 
 function renderTemplate(template, batch) {
