@@ -1,0 +1,1215 @@
+const STORAGE_KEY = "batch-tracking-tool-v1";
+const CLOUD_CONFIG_KEY = "batch-tracking-cloud-config-v1";
+const THEME_KEY = "batch-tracking-theme-v1";
+const EMS_PLACEHOLDER = "#ems_number#";
+const CLOUD_SQL = `create table if not exists public.tracking_tool_state (
+  id text primary key,
+  payload jsonb not null,
+  updated_at timestamptz not null default now()
+);
+
+alter table public.tracking_tool_state enable row level security;
+
+grant select, insert, update on public.tracking_tool_state to anon;
+grant select, insert, update on public.tracking_tool_state to authenticated;
+
+drop policy if exists "tracking_tool_state_read" on public.tracking_tool_state;
+drop policy if exists "tracking_tool_state_insert" on public.tracking_tool_state;
+drop policy if exists "tracking_tool_state_update" on public.tracking_tool_state;
+
+create policy "tracking_tool_state_read"
+on public.tracking_tool_state for select
+using (true);
+
+create policy "tracking_tool_state_insert"
+on public.tracking_tool_state for insert
+with check (true);
+
+create policy "tracking_tool_state_update"
+on public.tracking_tool_state for update
+using (true)
+with check (true);`;
+
+const defaultStages = [
+  { key: "info", name: "信息收到", type: "普通", template: "CHINA: Shipment Information Received" },
+  { key: "origin", name: "中国仓处理", type: "普通", template: "CHINA: Processed at origin facility" },
+  { key: "inspect", name: "检查核验", type: "普通", template: "CHINA: 检验检查中" },
+  { key: "customs-send", name: "送交清关", type: "送交清关", template: "CHINA: 送交海关，等待清关，中国邮政单号{ems}" },
+  { key: "flight-ready", name: "等待航班", type: "普通", template: "{destination}: 到达机场，等待航班" },
+  { key: "flight-departed", name: "航班起飞", type: "普通", template: "CHINA: Flight departed" },
+  { key: "flight-arrived", name: "到达目的国", type: "普通", template: "{destination}: Flight arrived，Customs clearance in progress" },
+  { key: "local-carrier", name: "交本地承运商", type: "普通", template: "{destination}: Handover to local courier" },
+  { key: "delivery", name: "派送中", type: "派送", template: "{destination}: In transit to next facility" },
+  { key: "signed", name: "已签收", type: "签收", template: "{destination}: Delivered" },
+  { key: "exception", name: "异常", type: "异常", template: "{destination}: Delivery exception, waiting for further processing" },
+];
+
+const sampleBatches = [
+  {
+    id: makeId(),
+    name: "2026-06-14 澳洲线 A批",
+    count: 1500,
+    destination: "AUSTRALIA",
+    origin: "CHINA",
+    stageKey: "origin",
+    createdAt: "2026-06-14T09:00",
+    numbers: ["AUS2606140001", "AUS2606140002", "AUS2606140003"],
+    events: [
+      makeEvent("origin", "2026-06-14T12:53", "普通", "CHINA: Processed at origin facility", false),
+      makeEvent("info", "2026-06-14T09:05", "普通", "CHINA: Shipment Information Received", true),
+    ],
+  },
+  {
+    id: makeId(),
+    name: "2026-06-12 澳洲线 B批",
+    count: 1000,
+    destination: "AUSTRALIA",
+    origin: "CHINA",
+    stageKey: "flight-departed",
+    createdAt: "2026-06-12T08:30",
+    numbers: ["AUS2606120001", "AUS2606120002"],
+    events: [
+      makeEvent("flight-departed", "2026-06-14T07:30", "普通", "CHINA: Flight departed", false),
+      makeEvent("origin", "2026-06-12T12:31", "普通", "CHINA: Processed at origin facility", true),
+      makeEvent("info", "2026-06-12T09:32", "普通", "CHINA: Shipment Information Received", true),
+    ],
+  },
+];
+
+let state = loadState();
+let selectedBatchId = state.batches[0]?.id ?? null;
+let pendingMerge = null;
+let draggedBatchId = null;
+let cloudConfig = loadCloudConfig();
+let isApplyingRemote = false;
+let cloudSaveTimer = null;
+
+const $ = (selector) => document.querySelector(selector);
+const $$ = (selector) => Array.from(document.querySelectorAll(selector));
+
+const stageSelects = ["#batch-stage", "#detail-stage"];
+const elements = {
+  batchForm: $("#batch-form"),
+  batchName: $("#batch-name"),
+  batchCount: $("#batch-count"),
+  batchDestination: $("#batch-destination"),
+  batchStage: $("#batch-stage"),
+  batchTime: $("#batch-time"),
+  batchNumbers: $("#batch-numbers"),
+  batchList: $("#batch-list"),
+  detail: $("#batch-detail"),
+  emptyDetail: $("#empty-detail"),
+  detailName: $("#detail-name"),
+  detailMeta: $("#detail-meta"),
+  detailStage: $("#detail-stage"),
+  detailTime: $("#detail-time"),
+  detailType: $("#detail-type"),
+  eventContent: $("#event-content"),
+  timeline: $("#timeline"),
+  pushOutput: $("#push-output"),
+  numberCount: $("#number-count"),
+  detailNumbers: $("#detail-numbers"),
+  searchInput: $("#search-input"),
+  templateList: $("#template-list"),
+  importArea: $("#import-area"),
+  jsonArea: $("#json-area"),
+  themeToggle: $("#theme-toggle"),
+  cloudStatus: $("#cloud-status"),
+  cloudUrl: $("#cloud-url"),
+  cloudKey: $("#cloud-key"),
+  cloudTable: $("#cloud-table"),
+  cloudRecordId: $("#cloud-record-id"),
+  cloudAutoSync: $("#cloud-auto-sync"),
+  mergeModal: $("#merge-modal"),
+  mergeSummary: $("#merge-summary"),
+  mergeSourceName: $("#merge-source-name"),
+  mergeSourceMeta: $("#merge-source-meta"),
+  mergeTargetName: $("#merge-target-name"),
+  mergeTargetMeta: $("#merge-target-meta"),
+  mergeWarning: $("#merge-warning"),
+  toast: $("#toast"),
+};
+
+boot();
+
+function boot() {
+  initTheme();
+  fillCloudForm();
+  $("#cloud-sql").textContent = CLOUD_SQL;
+  fillStageSelects();
+  elements.batchTime.value = toInputDateTime(new Date());
+  bindEvents();
+  render();
+  updateCloudStatus(cloudConfig.enabled ? "云端已配置" : "本地保存", cloudConfig.enabled ? "ok" : "");
+}
+
+function bindEvents() {
+  elements.batchForm.addEventListener("submit", addBatch);
+  elements.searchInput.addEventListener("input", renderBatchList);
+  elements.batchStage.addEventListener("change", () => {
+    const stage = getStage(elements.batchStage.value);
+    elements.batchDestination.value ||= "AUSTRALIA";
+    elements.batchTime.value ||= toInputDateTime(new Date());
+    if (stage) {
+      showToast(`默认模板：${stage.template}`);
+    }
+  });
+
+  $$(".tab").forEach((tab) => {
+    tab.addEventListener("click", () => switchView(tab.dataset.view));
+  });
+
+  $("#add-event-btn").addEventListener("click", addEventToSelectedBatch);
+  $("#mark-pushed-btn").addEventListener("click", markSelectedBatchPushed);
+  $("#copy-push-btn").addEventListener("click", copyPushOutput);
+  $("#save-numbers-btn").addEventListener("click", saveDetailNumbers);
+  $("#delete-batch-btn").addEventListener("click", deleteSelectedBatch);
+  $("#duplicate-batch-btn").addEventListener("click", duplicateSelectedBatch);
+  $("#split-batch-btn").addEventListener("click", splitSelectedBatch);
+  $("#export-csv-btn").addEventListener("click", downloadCsv);
+  $("#add-template-btn").addEventListener("click", addTemplate);
+  $("#import-btn").addEventListener("click", importCsv);
+  $("#download-json-btn").addEventListener("click", downloadJson);
+  $("#copy-json-btn").addEventListener("click", copyJson);
+  $("#restore-json-btn").addEventListener("click", restoreJson);
+  $("#reset-demo-btn").addEventListener("click", resetDemo);
+  $("#theme-toggle").addEventListener("click", toggleTheme);
+  $("#sync-now-btn").addEventListener("click", syncToCloudNow);
+  $("#save-cloud-config-btn").addEventListener("click", saveCloudConfigFromForm);
+  $("#cloud-sync-btn").addEventListener("click", syncToCloudNow);
+  $("#cloud-load-btn").addEventListener("click", loadFromCloud);
+  $("#cloud-disconnect-btn").addEventListener("click", clearCloudConfig);
+  $("#copy-sql-btn").addEventListener("click", copyCloudSql);
+  $("#cancel-merge-btn").addEventListener("click", closeMergeModal);
+  $("#confirm-merge-btn").addEventListener("click", confirmMergeBatches);
+  elements.mergeModal.addEventListener("click", (event) => {
+    if (event.target === elements.mergeModal) closeMergeModal();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !elements.mergeModal.hidden) closeMergeModal();
+  });
+  elements.detailStage.addEventListener("change", syncEventEditorFromStage);
+  elements.detailTime.addEventListener("change", syncEventEditorFromStage);
+}
+
+function loadState() {
+  const saved = localStorage.getItem(STORAGE_KEY);
+  if (!saved) {
+    return {
+      stages: structuredClone(defaultStages),
+      batches: structuredClone(sampleBatches),
+    };
+  }
+
+  try {
+    const parsed = JSON.parse(saved);
+    return normalizeState(parsed);
+  } catch {
+    return {
+      stages: structuredClone(defaultStages),
+      batches: structuredClone(sampleBatches),
+    };
+  }
+}
+
+function saveState() {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  queueCloudSync();
+}
+
+function render() {
+  fillStageSelects();
+  renderStats();
+  renderBatchList();
+  renderDetail();
+  renderTemplates();
+}
+
+function fillStageSelects() {
+  stageSelects.forEach((selector) => {
+    const select = $(selector);
+    const value = select.value;
+    select.innerHTML = state.stages
+      .map((stage) => `<option value="${escapeAttr(stage.key)}">${escapeHtml(stage.name)}</option>`)
+      .join("");
+    if (value && state.stages.some((stage) => stage.key === value)) {
+      select.value = value;
+    }
+  });
+}
+
+function renderStats() {
+  $("#stat-total").textContent = state.batches.length;
+  $("#stat-orders").textContent = state.batches.reduce((total, batch) => total + Number(batch.count || 0), 0).toLocaleString("zh-CN");
+  $("#stat-pending").textContent = state.batches
+    .reduce((total, batch) => total + batch.events.filter((event) => !event.pushed).length, 0)
+    .toLocaleString("zh-CN");
+}
+
+function renderBatchList() {
+  const query = elements.searchInput.value.trim().toLowerCase();
+  const batches = state.batches.filter((batch) => {
+    const text = [
+      batch.name,
+      batch.destination,
+      getStage(batch.stageKey)?.name,
+      batch.numbers.join(" "),
+      batch.events.map((event) => event.content).join(" "),
+    ]
+      .join(" ")
+      .toLowerCase();
+    return !query || text.includes(query);
+  });
+
+  if (!batches.length) {
+    elements.batchList.innerHTML = `<div class="empty-state"><p>没有匹配批次</p></div>`;
+    return;
+  }
+
+  elements.batchList.innerHTML = batches
+    .sort((a, b) => newestTime(b).localeCompare(newestTime(a)))
+    .map((batch) => {
+      const stage = getStage(batch.stageKey);
+      const pending = batch.events.filter((event) => !event.pushed).length;
+      return `
+        <button class="batch-card ${batch.id === selectedBatchId ? "active" : ""}" type="button" draggable="true" data-batch-id="${escapeAttr(batch.id)}" title="可拖动到另一个批次上合并">
+          <strong>${escapeHtml(batch.name)}</strong>
+          <div class="badge-row">
+            <span class="badge">${escapeHtml(stage?.name ?? "未设置")}</span>
+            <span class="badge">${Number(batch.count || 0).toLocaleString("zh-CN")} 票</span>
+            <span class="badge ${pending ? "warn" : "ok"}">${pending ? `${pending} 条待推送` : "已推送"}</span>
+          </div>
+          <p>${escapeHtml(batch.destination || "未填目的地")} · 最新 ${formatDisplayTime(newestTime(batch))}</p>
+        </button>
+      `;
+    })
+    .join("");
+
+  $$(".batch-card").forEach((card) => {
+    card.addEventListener("click", () => {
+      selectedBatchId = card.dataset.batchId;
+      render();
+    });
+    card.addEventListener("dragstart", handleBatchDragStart);
+    card.addEventListener("dragend", handleBatchDragEnd);
+    card.addEventListener("dragover", handleBatchDragOver);
+    card.addEventListener("dragleave", handleBatchDragLeave);
+    card.addEventListener("drop", handleBatchDrop);
+  });
+}
+
+function renderDetail() {
+  const batch = getSelectedBatch();
+  elements.emptyDetail.hidden = Boolean(batch);
+  elements.detail.hidden = !batch;
+
+  if (!batch) {
+    return;
+  }
+
+  const stage = getStage(batch.stageKey);
+  elements.detailName.textContent = batch.name;
+  elements.detailMeta.textContent = `${Number(batch.count || 0).toLocaleString("zh-CN")} 票 · ${batch.destination || "未填目的地"} · 当前节点：${stage?.name ?? "未设置"}`;
+  elements.detailStage.value = batch.stageKey;
+  elements.detailTime.value = toInputDateTime(newestTime(batch));
+  elements.detailType.value = stage?.type ?? "普通";
+  elements.eventContent.value = renderTemplate(stage?.template ?? "", batch);
+  elements.numberCount.textContent = batch.numbers.length;
+  elements.detailNumbers.value = batch.numbers.join("\n");
+
+  renderTimeline(batch);
+  renderPushOutput(batch);
+}
+
+function renderTimeline(batch) {
+  const events = [...batch.events].sort((a, b) => b.time.localeCompare(a.time));
+  if (!events.length) {
+    elements.timeline.innerHTML = `<div class="empty-state"><p>还没有轨迹，选择节点后加入轨迹</p></div>`;
+    return;
+  }
+
+  elements.timeline.innerHTML = events
+    .map(
+      (event) => `
+      <article class="timeline-item">
+        <time>${formatDisplayTime(event.time)}</time>
+        <p>
+          <strong>${escapeHtml(getStage(event.stageKey)?.name ?? event.stageKey)}</strong>
+          <br />
+          ${escapeHtml(event.content)}
+          <span class="badge ${event.pushed ? "ok" : "warn"}">${event.pushed ? "已推送" : "待推送"}</span>
+        </p>
+        <div class="timeline-actions">
+          <button class="mini-button" type="button" data-action="toggle" data-event-id="${escapeAttr(event.id)}">${event.pushed ? "撤回" : "已推"}</button>
+          <button class="mini-button" type="button" data-action="remove" data-event-id="${escapeAttr(event.id)}">删</button>
+        </div>
+      </article>
+    `
+    )
+    .join("");
+
+  $$(".timeline-actions button").forEach((button) => {
+    button.addEventListener("click", () => {
+      if (button.dataset.action === "toggle") {
+        toggleEventPushed(batch.id, button.dataset.eventId);
+      } else {
+        removeEvent(batch.id, button.dataset.eventId);
+      }
+    });
+  });
+}
+
+function renderPushOutput(batch) {
+  const pendingEvents = [...batch.events].filter((event) => !event.pushed).sort((a, b) => a.time.localeCompare(b.time));
+  const source = pendingEvents.length ? pendingEvents : [...batch.events].sort((a, b) => a.time.localeCompare(b.time));
+  elements.pushOutput.value = source
+    .map((event) => `${formatSystemTime(event.time)}\t${event.content}\t${event.type || "普通"}`)
+    .join("\n");
+}
+
+function renderTemplates() {
+  elements.templateList.innerHTML = state.stages
+    .map(
+      (stage) => `
+      <div class="template-row" data-stage-key="${escapeAttr(stage.key)}">
+        <label>
+          节点名称
+          <input data-field="name" value="${escapeAttr(stage.name)}" />
+        </label>
+        <label>
+          文案模板
+          <input data-field="template" value="${escapeAttr(stage.template)}" />
+        </label>
+        <label>
+          类型
+          <select data-field="type">
+            ${["普通", "送交清关", "派送", "签收", "异常"].map((type) => `<option value="${type}" ${stage.type === type ? "selected" : ""}>${type}</option>`).join("")}
+          </select>
+        </label>
+        <button class="mini-button" type="button" data-action="remove-template">删除</button>
+      </div>
+    `
+    )
+    .join("");
+
+  $$(".template-row").forEach((row) => {
+    row.querySelectorAll("input, select").forEach((input) => {
+      input.addEventListener("change", () => updateTemplate(row.dataset.stageKey, input.dataset.field, input.value));
+    });
+    row.querySelector("[data-action='remove-template']").addEventListener("click", () => removeTemplate(row.dataset.stageKey));
+  });
+}
+
+function addBatch(event) {
+  event.preventDefault();
+  const stage = getStage(elements.batchStage.value);
+  const batch = {
+    id: makeId(),
+    name: elements.batchName.value.trim(),
+    count: Number(elements.batchCount.value || 0),
+    destination: cleanUpper(elements.batchDestination.value || "AUSTRALIA"),
+    origin: "CHINA",
+    stageKey: elements.batchStage.value,
+    createdAt: elements.batchTime.value,
+    numbers: parseLines(elements.batchNumbers.value),
+    events: [
+      makeEvent(
+        elements.batchStage.value,
+        elements.batchTime.value,
+        stage?.type ?? "普通",
+        renderTemplate(stage?.template ?? "", {
+          destination: cleanUpper(elements.batchDestination.value || "AUSTRALIA"),
+          origin: "CHINA",
+        }),
+        false
+      ),
+    ],
+  };
+
+  state.batches.unshift(batch);
+  selectedBatchId = batch.id;
+  saveState();
+  elements.batchForm.reset();
+  elements.batchCount.value = 1500;
+  elements.batchDestination.value = "AUSTRALIA";
+  elements.batchTime.value = toInputDateTime(new Date());
+  render();
+  showToast("批次已保存");
+}
+
+function addEventToSelectedBatch() {
+  const batch = getSelectedBatch();
+  if (!batch) return;
+
+  const stageKey = elements.detailStage.value;
+  const stage = getStage(stageKey);
+  const time = elements.detailTime.value || toInputDateTime(new Date());
+  const content = elements.eventContent.value.trim() || renderTemplate(stage?.template ?? "", batch);
+  const type = elements.detailType.value || stage?.type || "普通";
+
+  const duplicate = batch.events.some((event) => event.stageKey === stageKey && event.time === time && event.content === content);
+  if (duplicate) {
+    showToast("这条轨迹已经存在");
+    return;
+  }
+
+  batch.stageKey = stageKey;
+  batch.events.push(makeEvent(stageKey, time, type, content, false));
+  sortBatchEvents(batch);
+  saveState();
+  render();
+  showToast("轨迹已加入待推送");
+}
+
+function syncEventEditorFromStage() {
+  const batch = getSelectedBatch();
+  const stage = getStage(elements.detailStage.value);
+  if (!batch || !stage) return;
+
+  elements.detailType.value = stage.type;
+  elements.eventContent.value = renderTemplate(stage.template, batch);
+}
+
+function markSelectedBatchPushed() {
+  const batch = getSelectedBatch();
+  if (!batch) return;
+
+  batch.events.forEach((event) => {
+    event.pushed = true;
+  });
+  saveState();
+  render();
+  showToast("当前批次已全部标记为已推送");
+}
+
+function copyPushOutput() {
+  const text = elements.pushOutput.value;
+  if (!text.trim()) {
+    showToast("没有可复制内容");
+    return;
+  }
+
+  navigator.clipboard.writeText(text).then(
+    () => showToast("推送内容已复制"),
+    () => showToast("复制失败，请手动复制")
+  );
+}
+
+function saveDetailNumbers() {
+  const batch = getSelectedBatch();
+  if (!batch) return;
+
+  batch.numbers = parseLines(elements.detailNumbers.value);
+  if (!batch.count || batch.count < batch.numbers.length) {
+    batch.count = batch.numbers.length;
+  }
+  saveState();
+  render();
+  showToast("单号已保存");
+}
+
+function deleteSelectedBatch() {
+  const batch = getSelectedBatch();
+  if (!batch) return;
+
+  if (!confirm(`确定删除「${batch.name}」吗？`)) return;
+  state.batches = state.batches.filter((item) => item.id !== batch.id);
+  selectedBatchId = state.batches[0]?.id ?? null;
+  saveState();
+  render();
+  showToast("批次已删除");
+}
+
+function duplicateSelectedBatch() {
+  const batch = getSelectedBatch();
+  if (!batch) return;
+
+  const copy = structuredClone(batch);
+  copy.id = makeId();
+  copy.name = `${batch.name} 副本`;
+  copy.events = copy.events.map((event) => ({ ...event, id: makeId(), pushed: false }));
+  state.batches.unshift(copy);
+  selectedBatchId = copy.id;
+  saveState();
+  render();
+  showToast("批次已复制");
+}
+
+function splitSelectedBatch() {
+  const batch = getSelectedBatch();
+  if (!batch) {
+    showToast("请先选择要拆分的批次");
+    return;
+  }
+
+  const countText = prompt("要拆出多少票？", Math.floor(Number(batch.count || 0) / 2).toString());
+  const splitCount = Number(countText);
+  if (!splitCount || splitCount <= 0 || splitCount >= Number(batch.count || 0)) {
+    showToast("拆分数量需要小于原批次票数");
+    return;
+  }
+
+  const splitNumbers = batch.numbers.splice(0, Math.min(splitCount, batch.numbers.length));
+  batch.count = Number(batch.count || 0) - splitCount;
+  const newBatch = structuredClone(batch);
+  newBatch.id = makeId();
+  newBatch.name = `${batch.name} 子批`;
+  newBatch.count = splitCount;
+  newBatch.numbers = splitNumbers;
+  newBatch.events = newBatch.events.map((event) => ({ ...event, id: makeId(), pushed: false }));
+  state.batches.unshift(newBatch);
+  selectedBatchId = newBatch.id;
+  saveState();
+  render();
+  showToast("子批已创建，可单独推进状态");
+}
+
+function handleBatchDragStart(event) {
+  draggedBatchId = event.currentTarget.dataset.batchId;
+  event.currentTarget.classList.add("dragging");
+  event.dataTransfer.effectAllowed = "move";
+  event.dataTransfer.setData("text/plain", draggedBatchId);
+}
+
+function handleBatchDragEnd(event) {
+  event.currentTarget.classList.remove("dragging");
+  $$(".batch-card.drop-target").forEach((card) => card.classList.remove("drop-target"));
+  draggedBatchId = null;
+}
+
+function handleBatchDragOver(event) {
+  const targetId = event.currentTarget.dataset.batchId;
+  const sourceId = event.dataTransfer.getData("text/plain") || draggedBatchId;
+  if (!sourceId || sourceId === targetId) return;
+  event.preventDefault();
+  event.currentTarget.classList.add("drop-target");
+  event.dataTransfer.dropEffect = "move";
+}
+
+function handleBatchDragLeave(event) {
+  event.currentTarget.classList.remove("drop-target");
+}
+
+function handleBatchDrop(event) {
+  event.preventDefault();
+  const sourceId = event.dataTransfer.getData("text/plain") || draggedBatchId;
+  const targetId = event.currentTarget.dataset.batchId;
+  event.currentTarget.classList.remove("drop-target");
+
+  if (!sourceId || !targetId || sourceId === targetId) {
+    return;
+  }
+
+  openMergeModal(sourceId, targetId);
+}
+
+function openMergeModal(sourceId, targetId) {
+  const source = state.batches.find((batch) => batch.id === sourceId);
+  const target = state.batches.find((batch) => batch.id === targetId);
+  if (!source || !target) return;
+
+  pendingMerge = { sourceId, targetId };
+  elements.mergeSourceName.textContent = source.name;
+  elements.mergeSourceMeta.textContent = `${Number(source.count || 0).toLocaleString("zh-CN")} 票 · ${getStage(source.stageKey)?.name ?? "未设置"}`;
+  elements.mergeTargetName.textContent = target.name;
+  elements.mergeTargetMeta.textContent = `${Number(target.count || 0).toLocaleString("zh-CN")} 票 · ${getStage(target.stageKey)?.name ?? "未设置"}`;
+  elements.mergeSummary.textContent = `合并后将保留「${target.name}」，并删除「${source.name}」。`;
+
+  const stageWarning =
+    source.stageKey !== target.stageKey
+      ? `两个批次当前节点不同：${getStage(source.stageKey)?.name ?? source.stageKey} / ${getStage(target.stageKey)?.name ?? target.stageKey}。合并后会以时间最新的轨迹作为当前节点。`
+      : "两个批次当前节点一致，适合合并回一个批次维护。";
+  elements.mergeWarning.textContent = stageWarning;
+  elements.mergeModal.hidden = false;
+}
+
+function closeMergeModal() {
+  pendingMerge = null;
+  elements.mergeModal.hidden = true;
+}
+
+function confirmMergeBatches() {
+  if (!pendingMerge) return;
+
+  const source = state.batches.find((batch) => batch.id === pendingMerge.sourceId);
+  const target = state.batches.find((batch) => batch.id === pendingMerge.targetId);
+  if (!source || !target) {
+    closeMergeModal();
+    showToast("批次不存在，无法合并");
+    return;
+  }
+
+  target.count = Number(target.count || 0) + Number(source.count || 0);
+  target.numbers = uniqueValues([...target.numbers, ...source.numbers]);
+  target.events = uniqueEvents([...target.events, ...source.events]);
+  sortBatchEvents(target);
+
+  const newestEvent = [...target.events].sort((a, b) => b.time.localeCompare(a.time))[0];
+  if (newestEvent) {
+    target.stageKey = newestEvent.stageKey;
+  }
+
+  target.name = mergeBatchName(target.name, source.name);
+  state.batches = state.batches.filter((batch) => batch.id !== source.id);
+  selectedBatchId = target.id;
+  closeMergeModal();
+  saveState();
+  render();
+  showToast("批次已合并");
+}
+
+function toggleEventPushed(batchId, eventId) {
+  const batch = state.batches.find((item) => item.id === batchId);
+  const event = batch?.events.find((item) => item.id === eventId);
+  if (!event) return;
+
+  event.pushed = !event.pushed;
+  saveState();
+  render();
+}
+
+function removeEvent(batchId, eventId) {
+  const batch = state.batches.find((item) => item.id === batchId);
+  if (!batch) return;
+
+  batch.events = batch.events.filter((event) => event.id !== eventId);
+  saveState();
+  render();
+}
+
+function updateTemplate(stageKey, field, value) {
+  const stage = getStage(stageKey);
+  if (!stage || !["name", "template", "type"].includes(field)) return;
+
+  stage[field] = value.trim();
+  saveState();
+  render();
+  showToast("模板已更新");
+}
+
+function addTemplate() {
+  const key = `custom-${Date.now()}`;
+  state.stages.push({
+    key,
+    name: "新节点",
+    type: "普通",
+    template: "{destination}: 新轨迹内容",
+  });
+  saveState();
+  render();
+  showToast("已新增模板");
+}
+
+function removeTemplate(stageKey) {
+  if (state.stages.length <= 1) {
+    showToast("至少保留一个模板");
+    return;
+  }
+
+  state.stages = state.stages.filter((stage) => stage.key !== stageKey);
+  state.batches.forEach((batch) => {
+    if (batch.stageKey === stageKey) {
+      batch.stageKey = state.stages[0].key;
+    }
+  });
+  saveState();
+  render();
+}
+
+function importCsv() {
+  const rows = parseCsv(elements.importArea.value);
+  if (!rows.length) {
+    showToast("没有可导入内容");
+    return;
+  }
+
+  const header = rows[0].map((cell) => cell.trim());
+  const dataRows = header.includes("批次名称") ? rows.slice(1) : rows;
+  const headerMap = new Map(header.map((name, index) => [name, index]));
+  const getCell = (row, names, fallbackIndex) => {
+    for (const name of names) {
+      if (headerMap.has(name)) return row[headerMap.get(name)] ?? "";
+    }
+    return row[fallbackIndex] ?? "";
+  };
+
+  const imported = dataRows
+    .filter((row) => row.some((cell) => cell.trim()))
+    .map((row) => {
+      const name = getCell(row, ["批次名称", "批次", "batch"], 0).trim();
+      const count = Number(getCell(row, ["票数", "数量", "count"], 1)) || 0;
+      const destination = cleanUpper(getCell(row, ["目的地", "国家", "destination"], 2) || "AUSTRALIA");
+      const stageName = getCell(row, ["当前节点", "状态", "stage"], 3).trim();
+      const stage = findStageByName(stageName) || state.stages[0];
+      const time = normalizeInputTime(getCell(row, ["时间", "节点时间", "time"], 4)) || toInputDateTime(new Date());
+      const numbers = parseLines(getCell(row, ["单号", "转运号", "numbers"], 5).replaceAll(";", "\n"));
+      return {
+        id: makeId(),
+        name: name || `导入批次 ${new Date().toLocaleString("zh-CN")}`,
+        count: count || numbers.length,
+        destination,
+        origin: "CHINA",
+        stageKey: stage.key,
+        createdAt: time,
+        numbers,
+        events: [makeEvent(stage.key, time, stage.type, renderTemplate(stage.template, { destination, origin: "CHINA" }), false)],
+      };
+    });
+
+  state.batches = [...imported, ...state.batches];
+  selectedBatchId = imported[0]?.id ?? selectedBatchId;
+  saveState();
+  render();
+  showToast(`已导入 ${imported.length} 个批次`);
+}
+
+function downloadCsv() {
+  const rows = [["批次名称", "票数", "目的地", "节点时间", "轨迹内容", "类型", "是否已推送", "单号"]];
+  state.batches.forEach((batch) => {
+    batch.events
+      .sort((a, b) => a.time.localeCompare(b.time))
+      .forEach((event) => {
+        rows.push([
+          batch.name,
+          batch.count,
+          batch.destination,
+          formatSystemTime(event.time),
+          event.content,
+          event.type || "普通",
+          event.pushed ? "是" : "否",
+          batch.numbers.join(";"),
+        ]);
+      });
+  });
+  downloadFile(`批次轨迹_${fileDate()}.csv`, "\ufeff" + toCsv(rows), "text/csv;charset=utf-8");
+}
+
+function downloadJson() {
+  downloadFile(`批次轨迹备份_${fileDate()}.json`, JSON.stringify(state, null, 2), "application/json;charset=utf-8");
+}
+
+function copyJson() {
+  const json = JSON.stringify(state, null, 2);
+  elements.jsonArea.value = json;
+  navigator.clipboard.writeText(json).then(
+    () => showToast("JSON已复制"),
+    () => showToast("JSON已生成，可手动复制")
+  );
+}
+
+function restoreJson() {
+  try {
+    const parsed = JSON.parse(elements.jsonArea.value);
+    if (!Array.isArray(parsed.batches) || !Array.isArray(parsed.stages)) {
+      throw new Error("invalid");
+    }
+    state = parsed;
+    selectedBatchId = state.batches[0]?.id ?? null;
+    saveState();
+    render();
+    showToast("JSON已恢复");
+  } catch {
+    showToast("JSON格式不正确");
+  }
+}
+
+function resetDemo() {
+  if (!confirm("恢复示例数据会覆盖当前浏览器本地数据，确定继续？")) return;
+  state = {
+    stages: structuredClone(defaultStages),
+    batches: structuredClone(sampleBatches),
+  };
+  selectedBatchId = state.batches[0]?.id ?? null;
+  saveState();
+  render();
+  showToast("示例数据已恢复");
+}
+
+function initTheme() {
+  const savedTheme = localStorage.getItem(THEME_KEY);
+  const theme = savedTheme || "light";
+  document.body.classList.toggle("dark-theme", theme === "dark");
+  elements.themeToggle.textContent = theme === "dark" ? "浅色" : "深色";
+}
+
+function toggleTheme() {
+  const isDark = document.body.classList.toggle("dark-theme");
+  localStorage.setItem(THEME_KEY, isDark ? "dark" : "light");
+  elements.themeToggle.textContent = isDark ? "浅色" : "深色";
+}
+
+function loadCloudConfig() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(CLOUD_CONFIG_KEY) || "{}");
+    return {
+      url: saved.url || "",
+      key: saved.key || "",
+      table: saved.table || "tracking_tool_state",
+      recordId: saved.recordId || "main",
+      autoSync: Boolean(saved.autoSync),
+      enabled: Boolean(saved.url && saved.key),
+    };
+  } catch {
+    return {
+      url: "",
+      key: "",
+      table: "tracking_tool_state",
+      recordId: "main",
+      autoSync: false,
+      enabled: false,
+    };
+  }
+}
+
+function fillCloudForm() {
+  elements.cloudUrl.value = cloudConfig.url || "";
+  elements.cloudKey.value = cloudConfig.key || "";
+  elements.cloudTable.value = cloudConfig.table || "tracking_tool_state";
+  elements.cloudRecordId.value = cloudConfig.recordId || "main";
+  elements.cloudAutoSync.checked = Boolean(cloudConfig.autoSync);
+}
+
+function saveCloudConfigFromForm() {
+  cloudConfig = {
+    url: elements.cloudUrl.value.trim().replace(/\/+$/, ""),
+    key: elements.cloudKey.value.trim(),
+    table: elements.cloudTable.value.trim() || "tracking_tool_state",
+    recordId: elements.cloudRecordId.value.trim() || "main",
+    autoSync: elements.cloudAutoSync.checked,
+    enabled: false,
+  };
+  cloudConfig.enabled = Boolean(cloudConfig.url && cloudConfig.key);
+  localStorage.setItem(CLOUD_CONFIG_KEY, JSON.stringify(cloudConfig));
+  updateCloudStatus(cloudConfig.enabled ? "云端已配置" : "缺少云配置", cloudConfig.enabled ? "ok" : "warn");
+  showToast(cloudConfig.enabled ? "云同步配置已保存" : "请填写 URL 和 anon key");
+}
+
+function clearCloudConfig() {
+  if (!confirm("确定清除云同步配置吗？本地批次数据不会删除。")) return;
+  localStorage.removeItem(CLOUD_CONFIG_KEY);
+  cloudConfig = loadCloudConfig();
+  fillCloudForm();
+  updateCloudStatus("本地保存", "");
+  showToast("云同步配置已清除");
+}
+
+function queueCloudSync() {
+  if (isApplyingRemote || !cloudConfig.enabled || !cloudConfig.autoSync) return;
+  clearTimeout(cloudSaveTimer);
+  cloudSaveTimer = setTimeout(() => syncToCloudNow(true), 900);
+}
+
+async function syncToCloudNow(silent = false) {
+  if (!ensureCloudConfig()) return;
+
+  updateCloudStatus("正在上传", "warn");
+  try {
+    const response = await fetch(`${cloudConfig.url}/rest/v1/${encodeURIComponent(cloudConfig.table)}?on_conflict=id`, {
+      method: "POST",
+      headers: cloudHeaders({ prefer: "resolution=merge-duplicates,return=minimal" }),
+      body: JSON.stringify({
+        id: cloudConfig.recordId,
+        payload: state,
+        updated_at: new Date().toISOString(),
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(await response.text());
+    }
+
+    updateCloudStatus("云端已同步", "ok");
+    if (!silent) showToast("当前数据已上传到云端");
+  } catch (error) {
+    updateCloudStatus("同步失败", "error");
+    showToast(`云同步失败：${formatError(error)}`);
+  }
+}
+
+async function loadFromCloud() {
+  if (!ensureCloudConfig()) return;
+  if (!confirm("从云端读取会覆盖当前浏览器本地数据，确定继续？")) return;
+
+  updateCloudStatus("正在读取", "warn");
+  try {
+    const url = `${cloudConfig.url}/rest/v1/${encodeURIComponent(cloudConfig.table)}?id=eq.${encodeURIComponent(cloudConfig.recordId)}&select=payload`;
+    const response = await fetch(url, {
+      method: "GET",
+      headers: cloudHeaders(),
+    });
+
+    if (!response.ok) {
+      throw new Error(await response.text());
+    }
+
+    const rows = await response.json();
+    if (!rows.length || !rows[0].payload) {
+      showToast("云端还没有这条记录");
+      updateCloudStatus("云端无数据", "warn");
+      return;
+    }
+
+    isApplyingRemote = true;
+    state = normalizeState(rows[0].payload);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    selectedBatchId = state.batches[0]?.id ?? null;
+    isApplyingRemote = false;
+    render();
+    updateCloudStatus("已读取云端", "ok");
+    showToast("已从云端恢复数据");
+  } catch (error) {
+    isApplyingRemote = false;
+    updateCloudStatus("读取失败", "error");
+    showToast(`云端读取失败：${formatError(error)}`);
+  }
+}
+
+function ensureCloudConfig() {
+  if (!cloudConfig.enabled) {
+    saveCloudConfigFromForm();
+  }
+
+  if (!cloudConfig.enabled) {
+    updateCloudStatus("缺少云配置", "warn");
+    showToast("请先填写并保存 Supabase URL 和 anon key");
+    switchView("export");
+    return false;
+  }
+  return true;
+}
+
+function cloudHeaders(extra = {}) {
+  const headers = {
+    apikey: cloudConfig.key,
+    Authorization: `Bearer ${cloudConfig.key}`,
+    "Content-Type": "application/json",
+  };
+  if (extra.prefer) headers.Prefer = extra.prefer;
+  return headers;
+}
+
+function updateCloudStatus(text, tone = "") {
+  elements.cloudStatus.textContent = text;
+  elements.cloudStatus.classList.remove("ok", "warn", "error");
+  if (tone) elements.cloudStatus.classList.add(tone);
+}
+
+function copyCloudSql() {
+  navigator.clipboard.writeText(CLOUD_SQL).then(
+    () => showToast("建表SQL已复制"),
+    () => showToast("复制失败，请手动复制")
+  );
+}
+
+function switchView(viewName) {
+  $$(".tab").forEach((tab) => tab.classList.toggle("active", tab.dataset.view === viewName));
+  $$(".view").forEach((view) => view.classList.remove("active-view"));
+  $(`#view-${viewName}`).classList.add("active-view");
+}
+
+function makeEvent(stageKey, time, type, content, pushed) {
+  return {
+    id: makeId(),
+    stageKey,
+    time: normalizeInputTime(time) || toInputDateTime(new Date()),
+    type,
+    content,
+    pushed: Boolean(pushed),
+  };
+}
+
+function makeId() {
+  if (window.crypto?.randomUUID) {
+    return window.crypto.randomUUID();
+  }
+  return `id-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function normalizeState(value) {
+  return {
+    stages: Array.isArray(value?.stages) && value.stages.length ? value.stages : structuredClone(defaultStages),
+    batches: Array.isArray(value?.batches) ? value.batches : [],
+  };
+}
+
+function renderTemplate(template, batch) {
+  return String(template)
+    .replaceAll("{origin}", batch.origin || "CHINA")
+    .replaceAll("{destination}", batch.destination || "AUSTRALIA")
+    .replaceAll("{ems}", EMS_PLACEHOLDER);
+}
+
+function getSelectedBatch() {
+  return state.batches.find((batch) => batch.id === selectedBatchId) ?? null;
+}
+
+function getStage(key) {
+  return state.stages.find((stage) => stage.key === key);
+}
+
+function findStageByName(name) {
+  const normalized = name.toLowerCase();
+  return state.stages.find((stage) => stage.name.toLowerCase() === normalized || stage.key.toLowerCase() === normalized);
+}
+
+function sortBatchEvents(batch) {
+  batch.events.sort((a, b) => a.time.localeCompare(b.time));
+}
+
+function uniqueValues(values) {
+  return Array.from(new Set(values.map((value) => String(value || "").trim()).filter(Boolean)));
+}
+
+function uniqueEvents(events) {
+  const seen = new Set();
+  const result = [];
+  events.forEach((event) => {
+    const key = [event.stageKey, event.time, event.content, event.type].join("|");
+    if (seen.has(key)) return;
+    seen.add(key);
+    result.push({ ...event, id: event.id || makeId() });
+  });
+  return result;
+}
+
+function mergeBatchName(targetName, sourceName) {
+  if (targetName.includes("合并")) return targetName;
+  const commonDate = targetName.match(/\d{4}-\d{2}-\d{2}/)?.[0] || sourceName.match(/\d{4}-\d{2}-\d{2}/)?.[0];
+  if (commonDate) return `${commonDate} 合并批次`;
+  return `${targetName} 合并`;
+}
+
+function newestTime(batch) {
+  const times = [batch.createdAt, ...batch.events.map((event) => event.time)].filter(Boolean);
+  return times.sort().at(-1) || toInputDateTime(new Date());
+}
+
+function parseLines(text) {
+  return text
+    .split(/\r?\n|,|，/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function parseCsv(text) {
+  const rows = [];
+  let row = [];
+  let cell = "";
+  let quoted = false;
+
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    const next = text[index + 1];
+
+    if (char === '"' && quoted && next === '"') {
+      cell += '"';
+      index += 1;
+    } else if (char === '"') {
+      quoted = !quoted;
+    } else if (char === "," && !quoted) {
+      row.push(cell);
+      cell = "";
+    } else if ((char === "\n" || char === "\r") && !quoted) {
+      if (char === "\r" && next === "\n") index += 1;
+      row.push(cell);
+      rows.push(row);
+      row = [];
+      cell = "";
+    } else {
+      cell += char;
+    }
+  }
+
+  row.push(cell);
+  rows.push(row);
+  return rows.filter((item) => item.some((cellValue) => cellValue.trim()));
+}
+
+function toCsv(rows) {
+  return rows
+    .map((row) =>
+      row
+        .map((cell) => {
+          const value = String(cell ?? "");
+          if (/[",\n\r]/.test(value)) {
+            return `"${value.replaceAll('"', '""')}"`;
+          }
+          return value;
+        })
+        .join(",")
+    )
+    .join("\r\n");
+}
+
+function normalizeInputTime(value) {
+  if (!value) return "";
+  const trimmed = String(value).trim();
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(trimmed)) return trimmed.slice(0, 16);
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(trimmed)) return trimmed.replace(" ", "T").slice(0, 16);
+  const date = new Date(trimmed);
+  if (!Number.isNaN(date.getTime())) return toInputDateTime(date);
+  return "";
+}
+
+function toInputDateTime(value) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const pad = (number) => String(number).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function formatDisplayTime(value) {
+  return normalizeInputTime(value).replace("T", " ");
+}
+
+function formatSystemTime(value) {
+  const base = normalizeInputTime(value).replace("T", " ");
+  return base.length === 16 ? `${base}:00` : base;
+}
+
+function cleanUpper(value) {
+  return String(value || "").trim().toUpperCase();
+}
+
+function formatError(error) {
+  return String(error?.message || error || "未知错误").slice(0, 140);
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function escapeAttr(value) {
+  return escapeHtml(value);
+}
+
+function downloadFile(filename, content, type) {
+  const blob = new Blob([content], { type });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function fileDate() {
+  const date = new Date();
+  const pad = (number) => String(number).padStart(2, "0");
+  return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}_${pad(date.getHours())}${pad(date.getMinutes())}`;
+}
+
+let toastTimer = null;
+function showToast(message) {
+  elements.toast.textContent = message;
+  elements.toast.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => elements.toast.classList.remove("show"), 2200);
+}

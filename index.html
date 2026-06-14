@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>批次轨迹维护工具</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">轨</div>
+          <div>
+            <h1>批次轨迹维护</h1>
+            <p>按批次跟进订单状态，生成可推送轨迹</p>
+          </div>
+        </div>
+
+        <div class="quick-stats" aria-label="批次统计">
+          <div>
+            <span id="stat-total">0</span>
+            <label>批次</label>
+          </div>
+          <div>
+            <span id="stat-orders">0</span>
+            <label>票件</label>
+          </div>
+          <div>
+            <span id="stat-pending">0</span>
+            <label>待推送</label>
+          </div>
+        </div>
+
+        <section class="panel new-batch-panel">
+          <div class="panel-title">
+            <h2>新建批次</h2>
+            <button class="icon-button" id="reset-demo-btn" type="button" title="恢复示例数据" aria-label="恢复示例数据">
+              ↺
+            </button>
+          </div>
+          <form id="batch-form" class="stack-form">
+            <label>
+              批次名称
+              <input id="batch-name" type="text" placeholder="如 2026-06-14 澳洲线 A批" required />
+            </label>
+            <div class="two-cols">
+              <label>
+                票数
+                <input id="batch-count" type="number" min="1" value="1500" required />
+              </label>
+              <label>
+                目的地
+                <input id="batch-destination" type="text" value="AUSTRALIA" />
+              </label>
+            </div>
+            <label>
+              当前节点
+              <select id="batch-stage"></select>
+            </label>
+            <label>
+              节点时间
+              <input id="batch-time" type="datetime-local" required />
+            </label>
+            <label>
+              单号 / 转运号
+              <textarea id="batch-numbers" rows="5" placeholder="一行一个单号；也可以粘贴转运号"></textarea>
+            </label>
+            <button class="primary-button" type="submit">保存批次</button>
+          </form>
+        </section>
+      </aside>
+
+      <main class="workspace">
+        <header class="topbar">
+          <div class="tabs" role="tablist" aria-label="视图切换">
+            <button class="tab active" data-view="batches" type="button">批次</button>
+            <button class="tab" data-view="templates" type="button">模板</button>
+            <button class="tab" data-view="export" type="button">导入导出</button>
+          </div>
+          <div class="toolbar">
+            <button class="secondary-button theme-toggle" id="theme-toggle" type="button">深色</button>
+            <span class="sync-pill" id="cloud-status">本地保存</span>
+            <button class="secondary-button" id="sync-now-btn" type="button">同步到云</button>
+            <label class="search-box">
+              <span>⌕</span>
+              <input id="search-input" type="search" placeholder="搜索批次、单号、状态" />
+            </label>
+            <button class="secondary-button" id="export-csv-btn" type="button">导出推送CSV</button>
+          </div>
+        </header>
+
+        <section id="view-batches" class="view active-view">
+          <div class="board">
+            <section class="batch-list-panel">
+              <div class="section-heading">
+                <div>
+                  <h2>批次看板</h2>
+                  <p>拖动一个批次到另一个批次上可合并，合并前会二次确认</p>
+                </div>
+                <button class="secondary-button" id="split-batch-btn" type="button">拆分当前批次</button>
+              </div>
+              <div class="merge-hint">拆出去的子批如果状态又一致了，拖回原批次即可合并。</div>
+              <div id="batch-list" class="batch-list"></div>
+            </section>
+
+            <section class="detail-panel">
+              <div id="empty-detail" class="empty-state">
+                <h2>选择一个批次</h2>
+                <p>左侧选择批次后，可以推进状态、生成轨迹、标记已推送。</p>
+              </div>
+
+              <div id="batch-detail" class="detail-content" hidden>
+                <div class="detail-header">
+                  <div>
+                    <h2 id="detail-name"></h2>
+                    <p id="detail-meta"></p>
+                  </div>
+                  <div class="detail-actions">
+                    <button class="secondary-button" id="duplicate-batch-btn" type="button">复制批次</button>
+                    <button class="danger-button" id="delete-batch-btn" type="button">删除</button>
+                  </div>
+                </div>
+
+                <div class="status-grid">
+                  <label>
+                    当前节点
+                    <select id="detail-stage"></select>
+                  </label>
+                  <label>
+                    发生时间
+                    <input id="detail-time" type="datetime-local" />
+                  </label>
+                  <label>
+                    推送类型
+                    <select id="detail-type">
+                      <option value="普通">普通</option>
+                      <option value="送交清关">送交清关</option>
+                      <option value="派送">派送</option>
+                      <option value="签收">签收</option>
+                      <option value="异常">异常</option>
+                    </select>
+                  </label>
+                  <button class="primary-button align-end" id="add-event-btn" type="button">加入轨迹</button>
+                </div>
+
+                <label class="full-label">
+                  本次轨迹内容
+                  <textarea id="event-content" rows="2"></textarea>
+                </label>
+
+                <div class="timeline-header">
+                  <div>
+                    <h3>轨迹链</h3>
+                    <p>按时间从新到旧显示，导出时会保留每条推送内容</p>
+                  </div>
+                  <button class="secondary-button" id="mark-pushed-btn" type="button">标记全部已推送</button>
+                </div>
+                <div id="timeline" class="timeline"></div>
+
+                <div class="push-box">
+                  <div>
+                    <h3>批量推送内容</h3>
+                    <p>复制到你图1系统的内容区域；#ems_number# 会由系统替换</p>
+                  </div>
+                  <button class="secondary-button" id="copy-push-btn" type="button">复制内容</button>
+                </div>
+                <textarea id="push-output" class="output-area" rows="7" readonly></textarea>
+
+                <details class="number-details">
+                  <summary>查看 / 修改单号，共 <span id="number-count">0</span> 条</summary>
+                  <textarea id="detail-numbers" rows="8"></textarea>
+                  <button class="secondary-button" id="save-numbers-btn" type="button">保存单号</button>
+                </details>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section id="view-templates" class="view">
+          <div class="template-layout">
+            <section class="panel">
+              <div class="section-heading">
+                <div>
+                  <h2>轨迹模板库</h2>
+                  <p>模板支持变量：{origin}、{destination}、{ems}</p>
+                </div>
+                <button class="secondary-button" id="add-template-btn" type="button">新增模板</button>
+              </div>
+              <div id="template-list" class="template-list"></div>
+            </section>
+          </div>
+        </section>
+
+        <section id="view-export" class="view">
+          <div class="import-export-grid">
+            <section class="panel">
+              <h2>导入批次</h2>
+              <p class="muted">支持粘贴 CSV。表头：批次名称,票数,目的地,当前节点,时间,单号</p>
+              <textarea id="import-area" rows="12" placeholder="批次名称,票数,目的地,当前节点,时间,单号"></textarea>
+              <button class="primary-button" id="import-btn" type="button">导入</button>
+            </section>
+            <section class="panel">
+              <h2>备份 / 恢复</h2>
+              <p class="muted">JSON 备份包含批次、轨迹、模板，适合每天收工保存一份。</p>
+              <div class="backup-actions">
+                <button class="secondary-button" id="download-json-btn" type="button">下载JSON备份</button>
+                <button class="secondary-button" id="copy-json-btn" type="button">复制JSON</button>
+              </div>
+              <textarea id="json-area" rows="12" placeholder="粘贴 JSON 后点恢复"></textarea>
+              <button class="danger-button" id="restore-json-btn" type="button">恢复JSON</button>
+            </section>
+            <section class="panel cloud-panel">
+              <h2>云数据库同步</h2>
+              <p class="muted">支持 Supabase 云数据库。先在 Supabase 建表，再填写项目 URL 和 anon key。</p>
+              <div class="sql-box">
+                <button class="mini-button" id="copy-sql-btn" type="button">复制建表SQL</button>
+                <pre id="cloud-sql">create table if not exists public.tracking_tool_state (
+  id text primary key,
+  payload jsonb not null,
+  updated_at timestamptz not null default now()
+);
+
+alter table public.tracking_tool_state enable row level security;
+
+grant select, insert, update on public.tracking_tool_state to anon;
+grant select, insert, update on public.tracking_tool_state to authenticated;
+
+drop policy if exists "tracking_tool_state_read" on public.tracking_tool_state;
+drop policy if exists "tracking_tool_state_insert" on public.tracking_tool_state;
+drop policy if exists "tracking_tool_state_update" on public.tracking_tool_state;
+
+create policy "tracking_tool_state_read"
+on public.tracking_tool_state for select
+using (true);
+
+create policy "tracking_tool_state_insert"
+on public.tracking_tool_state for insert
+with check (true);
+
+create policy "tracking_tool_state_update"
+on public.tracking_tool_state for update
+using (true)
+with check (true);</pre>
+              </div>
+              <div class="cloud-form">
+                <label>
+                  Supabase 项目 URL
+                  <input id="cloud-url" type="url" placeholder="https://xxxx.supabase.co" />
+                </label>
+                <label>
+                  anon key
+                  <input id="cloud-key" type="password" placeholder="eyJ..." autocomplete="off" />
+                </label>
+                <div class="two-cols">
+                  <label>
+                    表名
+                    <input id="cloud-table" type="text" value="tracking_tool_state" />
+                  </label>
+                  <label>
+                    记录ID
+                    <input id="cloud-record-id" type="text" value="main" />
+                  </label>
+                </div>
+                <label class="check-row">
+                  <input id="cloud-auto-sync" type="checkbox" />
+                  <span>本地修改后自动同步到云端</span>
+                </label>
+                <div class="backup-actions">
+                  <button class="primary-button" id="save-cloud-config-btn" type="button">保存配置</button>
+                  <button class="secondary-button" id="cloud-sync-btn" type="button">上传当前数据</button>
+                  <button class="secondary-button" id="cloud-load-btn" type="button">从云端读取</button>
+                  <button class="danger-button" id="cloud-disconnect-btn" type="button">清除配置</button>
+                </div>
+              </div>
+            </section>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div id="merge-modal" class="modal-backdrop" hidden>
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="merge-title">
+        <h2 id="merge-title">确认合并批次</h2>
+        <p id="merge-summary" class="muted"></p>
+        <div class="merge-preview">
+          <div>
+            <span>拖动批次</span>
+            <strong id="merge-source-name"></strong>
+            <p id="merge-source-meta"></p>
+          </div>
+          <div>
+            <span>合并到</span>
+            <strong id="merge-target-name"></strong>
+            <p id="merge-target-meta"></p>
+          </div>
+        </div>
+        <p class="merge-warning" id="merge-warning"></p>
+        <div class="modal-actions">
+          <button class="secondary-button" id="cancel-merge-btn" type="button">取消</button>
+          <button class="primary-button" id="confirm-merge-btn" type="button">确认合并</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="app.js"></script>
+  </body>
+</html>
