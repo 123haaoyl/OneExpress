@@ -58,6 +58,7 @@ let lastSyncedRevision = 0;
 let lastLocalChangeAt = 0;
 let editingEventId = null;
 let localSaveTimer = null;
+let deferredCloudPull = false;
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
@@ -179,6 +180,7 @@ function bindEvents() {
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && !elements.mergeModal.hidden) closeMergeModal();
   });
+  document.addEventListener("focusout", retryDeferredCloudPull);
   elements.detailStage.addEventListener("change", syncEventEditorFromStage);
   elements.detailTime.addEventListener("change", syncEventEditorFromStage);
   elements.detailNumbers.addEventListener("input", updateSelectedBatchNumbersFromTextarea);
@@ -332,9 +334,9 @@ function renderDetail() {
 }
 
 function renderTimeline(batch) {
-  const events = [...batch.events].filter((event) => event.pushed).sort((a, b) => a.time.localeCompare(b.time));
+  const events = [...batch.events].sort((a, b) => a.time.localeCompare(b.time));
   if (!events.length) {
-    elements.timeline.innerHTML = `<div class="empty-state"><p>还没有已推送轨迹，待推送内容会显示在下方批量推送内容里</p></div>`;
+    elements.timeline.innerHTML = `<div class="empty-state"><p>还没有轨迹，选择节点后加入轨迹</p></div>`;
     return;
   }
 
@@ -382,7 +384,7 @@ function renderTimeline(batch) {
         </p>
         <div class="timeline-actions">
           <button class="mini-button" type="button" data-action="edit" data-event-id="${escapeAttr(event.id)}">编辑</button>
-          <button class="mini-button" type="button" data-action="toggle" data-event-id="${escapeAttr(event.id)}">${event.pushed ? "撤回" : "已推"}</button>
+          <button class="mini-button" type="button" data-action="toggle" data-event-id="${escapeAttr(event.id)}">${event.pushed ? "撤回" : "推送"}</button>
           <button class="mini-button" type="button" data-action="remove" data-event-id="${escapeAttr(event.id)}">删</button>
         </div>
       </article>
@@ -411,7 +413,7 @@ function renderTimeline(batch) {
 }
 
 function renderPushOutput(batch) {
-  const source = [...batch.events].filter((event) => !event.pushed).sort((a, b) => a.time.localeCompare(b.time));
+  const source = [...batch.events].filter((event) => event.pushed).sort((a, b) => a.time.localeCompare(b.time));
   elements.pushOutput.value = source
     .map((event) => `${formatSystemTime(event.time)}\t${event.content}\t${event.type || "普通"}`)
     .join("\n");
@@ -1075,8 +1077,9 @@ function startCloudSync() {
 
   const interval = Math.max(5000, cloudConfig.pullIntervalMs || 15000);
   setInterval(() => {
-    if (hasUnsyncedLocalChanges()) {
+    if (shouldDeferRemoteApply()) {
       updateCloudStatus("本地修改待上传", "warn");
+      deferredCloudPull = true;
       return;
     }
     loadFromCloud({ silent: true, confirmOverwrite: false, onlyIfNewer: true });
@@ -1132,6 +1135,8 @@ async function syncToCloudNow(silent = false) {
     cloudSaveInFlight = false;
     if (needsCloudSyncAfterFlight || localRevision > lastSyncedRevision) {
       queueCloudSync();
+    } else {
+      retryDeferredCloudPull();
     }
   }
 }
@@ -1140,8 +1145,9 @@ async function loadFromCloud(options = {}) {
   if (!ensureCloudConfig()) return;
   const { silent = false, confirmOverwrite = false, onlyIfNewer = false } = options;
   if (confirmOverwrite && !confirm("从云端读取会覆盖当前浏览器本地数据，确定继续？")) return;
-  if (!confirmOverwrite && hasUnsyncedLocalChanges()) {
+  if (!confirmOverwrite && shouldDeferRemoteApply()) {
     updateCloudStatus("本地修改待上传", "warn");
+    deferredCloudPull = true;
     return;
   }
 
@@ -1159,8 +1165,9 @@ async function loadFromCloud(options = {}) {
 
     const rows = await response.json();
     if (!rows.length || !rows[0].payload) {
-      if (!confirmOverwrite && hasUnsyncedLocalChanges()) {
+      if (!confirmOverwrite && shouldDeferRemoteApply()) {
         updateCloudStatus("本地修改待上传", "warn");
+        deferredCloudPull = true;
         return;
       }
       isApplyingRemote = true;
@@ -1176,8 +1183,9 @@ async function loadFromCloud(options = {}) {
 
     const remoteState = normalizeState(rows[0].payload);
     const remoteVersion = rows[0].updated_at || "";
-    if (!confirmOverwrite && hasUnsyncedLocalChanges()) {
+    if (!confirmOverwrite && shouldDeferRemoteApply()) {
       updateCloudStatus("本地修改待上传", "warn");
+      deferredCloudPull = true;
       return;
     }
     if (onlyIfNewer && remoteVersion && remoteVersion === lastCloudVersion) {
@@ -1188,9 +1196,10 @@ async function loadFromCloud(options = {}) {
     isApplyingRemote = true;
     state = remoteState;
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-    selectedBatchId = state.batches[0]?.id ?? null;
+    keepSelectedBatchIfPossible();
     lastCloudVersion = remoteVersion;
     lastSyncedRevision = localRevision;
+    deferredCloudPull = false;
     isApplyingRemote = false;
     render();
     updateCloudStatus("已读取云端", "ok");
@@ -1204,6 +1213,29 @@ async function loadFromCloud(options = {}) {
 
 function hasUnsyncedLocalChanges() {
   return cloudSaveInFlight || localRevision > lastSyncedRevision || Date.now() - lastLocalChangeAt < 1500;
+}
+
+function shouldDeferRemoteApply() {
+  return hasUnsyncedLocalChanges() || isUserEditing();
+}
+
+function isUserEditing() {
+  if (editingEventId) return true;
+  const active = document.activeElement;
+  if (!active) return false;
+  return ["INPUT", "TEXTAREA", "SELECT"].includes(active.tagName);
+}
+
+function keepSelectedBatchIfPossible() {
+  if (!state.batches.some((batch) => batch.id === selectedBatchId)) {
+    selectedBatchId = state.batches[0]?.id ?? null;
+  }
+}
+
+function retryDeferredCloudPull() {
+  if (!deferredCloudPull || shouldDeferRemoteApply()) return;
+  deferredCloudPull = false;
+  loadFromCloud({ silent: true, confirmOverwrite: false, onlyIfNewer: true });
 }
 
 function ensureCloudConfig() {
