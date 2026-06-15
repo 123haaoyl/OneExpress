@@ -75,6 +75,7 @@
         <header class="topbar">
           <div class="tabs" role="tablist" aria-label="视图切换">
             <button class="tab active" data-view="batches" type="button">批次</button>
+            <button class="tab" data-view="trash" type="button">回收站</button>
             <button class="tab" data-view="templates" type="button">模板</button>
             <button class="tab" data-view="export" type="button">导入导出</button>
           </div>
@@ -116,6 +117,11 @@
                     <p id="detail-meta"></p>
                   </div>
                   <div class="detail-actions">
+                    <label class="inline-edit-label">
+                      批次名称
+                      <input id="detail-name-input" type="text" />
+                    </label>
+                    <button class="secondary-button" id="save-batch-name-btn" type="button">保存名称</button>
                     <button class="secondary-button" id="duplicate-batch-btn" type="button">复制批次</button>
                     <button class="danger-button" id="delete-batch-btn" type="button">移入回收站</button>
                   </div>
@@ -176,6 +182,28 @@
           </div>
         </section>
 
+        <section id="view-trash" class="view">
+          <section class="panel safety-panel">
+            <div class="section-heading">
+              <div>
+                <h2>回收站</h2>
+                <p>删除的批次会先放在这里，可以恢复，也可以彻底删除。</p>
+              </div>
+              <button class="secondary-button" id="create-backup-btn" type="button">手动快照</button>
+            </div>
+            <div class="safety-grid">
+              <div>
+                <h3>已删除批次</h3>
+                <div id="trash-list" class="safety-list"></div>
+              </div>
+              <div>
+                <h3>自动快照</h3>
+                <div id="backup-list" class="safety-list"></div>
+              </div>
+            </div>
+          </section>
+        </section>
+
         <section id="view-templates" class="view">
           <div class="template-layout">
             <section class="panel">
@@ -208,25 +236,6 @@
               </div>
               <textarea id="json-area" rows="12" placeholder="粘贴 JSON 后点恢复"></textarea>
               <button class="danger-button" id="restore-json-btn" type="button">恢复JSON</button>
-            </section>
-            <section class="panel safety-panel">
-              <div class="section-heading">
-                <div>
-                  <h2>回收站 / 自动快照</h2>
-                  <p>误删批次可以恢复，危险操作前会自动保留最近 20 份快照。</p>
-                </div>
-                <button class="secondary-button" id="create-backup-btn" type="button">手动快照</button>
-              </div>
-              <div class="safety-grid">
-                <div>
-                  <h3>回收站</h3>
-                  <div id="trash-list" class="safety-list"></div>
-                </div>
-                <div>
-                  <h3>自动快照</h3>
-                  <div id="backup-list" class="safety-list"></div>
-                </div>
-              </div>
             </section>
           </div>
         </section>

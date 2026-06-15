@@ -295,6 +295,8 @@ textarea:focus {
   background: var(--surface);
   border-radius: 8px;
   padding: 4px;
+  flex-wrap: wrap;
+  gap: 4px;
 }
 
 .tab {
@@ -504,6 +506,13 @@ textarea:focus {
 .detail-actions {
   display: flex;
   gap: 8px;
+  flex-wrap: wrap;
+  align-items: end;
+}
+
+.inline-edit-label {
+  min-width: 220px;
+  flex: 1;
 }
 
 .status-grid {
@@ -531,6 +540,10 @@ textarea:focus {
   background: var(--surface);
 }
 
+.timeline-item.editing {
+  align-items: start;
+}
+
 .timeline-item time {
   color: var(--muted);
   font-size: 13px;
@@ -544,6 +557,16 @@ textarea:focus {
 .timeline-actions {
   display: flex;
   gap: 6px;
+  flex-wrap: wrap;
+}
+
+.timeline-edit-form {
+  display: grid;
+  gap: 10px;
+}
+
+.timeline-edit-content {
+  grid-column: 1 / -1;
 }
 
 .mini-button {
@@ -658,6 +681,14 @@ textarea:focus {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.danger-mini {
+  color: var(--danger);
+}
+
+.batch-latest {
+  color: var(--text);
 }
 
 .cloud-form {

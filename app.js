@@ -1,11 +1,3 @@
-window.TRACKING_CLOUD_CONFIG = {
-  url: "https://uyyloacgdomeovmtdvqk.supabase.co",
-  key: "sb_publishable_8lA7vEOo6JIGUKUQ_RHA1g_xZPzH-fi",
-  table: "tracking_tool_state",
-  recordId: "main",
-  pullIntervalMs: 15000,
-};
-
 const STORAGE_KEY = "batch-tracking-tool-v1";
 const THEME_KEY = "batch-tracking-theme-v1";
 const EMS_PLACEHOLDER = "#ems_number#";
@@ -59,6 +51,13 @@ let cloudConfig = null;
 let isApplyingRemote = false;
 let cloudSaveTimer = null;
 let lastCloudVersion = "";
+let cloudSaveInFlight = false;
+let needsCloudSyncAfterFlight = false;
+let localRevision = 0;
+let lastSyncedRevision = 0;
+let lastLocalChangeAt = 0;
+let editingEventId = null;
+let localSaveTimer = null;
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
@@ -76,6 +75,7 @@ const elements = {
   detail: $("#batch-detail"),
   emptyDetail: $("#empty-detail"),
   detailName: $("#detail-name"),
+  detailNameInput: $("#detail-name-input"),
   detailMeta: $("#detail-meta"),
   detailStage: $("#detail-stage"),
   detailTime: $("#detail-time"),
@@ -109,6 +109,10 @@ loadOptionalCloudConfig().finally(() => {
 });
 
 function loadOptionalCloudConfig() {
+  if (window.TRACKING_CLOUD_CONFIG?.url && window.TRACKING_CLOUD_CONFIG?.key) {
+    return Promise.resolve();
+  }
+
   return new Promise((resolve) => {
     const script = document.createElement("script");
     script.src = "config.js";
@@ -149,6 +153,7 @@ function bindEvents() {
   $("#mark-pushed-btn").addEventListener("click", markSelectedBatchPushed);
   $("#copy-push-btn").addEventListener("click", copyPushOutput);
   $("#save-numbers-btn").addEventListener("click", saveDetailNumbers);
+  $("#save-batch-name-btn").addEventListener("click", saveSelectedBatchName);
   $("#delete-batch-btn").addEventListener("click", deleteSelectedBatch);
   $("#duplicate-batch-btn").addEventListener("click", duplicateSelectedBatch);
   $("#split-batch-btn").addEventListener("click", splitSelectedBatch);
@@ -176,6 +181,13 @@ function bindEvents() {
   });
   elements.detailStage.addEventListener("change", syncEventEditorFromStage);
   elements.detailTime.addEventListener("change", syncEventEditorFromStage);
+  elements.detailNumbers.addEventListener("input", updateSelectedBatchNumbersFromTextarea);
+  elements.detailNameInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      saveSelectedBatchName();
+    }
+  });
 }
 
 function loadState() {
@@ -199,8 +211,16 @@ function loadState() {
 }
 
 function saveState() {
+  localRevision += 1;
+  lastLocalChangeAt = Date.now();
+  state.batches.forEach(syncBatchDerivedFields);
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   queueCloudSync();
+}
+
+function queueSaveState() {
+  clearTimeout(localSaveTimer);
+  localSaveTimer = setTimeout(saveState, 900);
 }
 
 function render() {
@@ -227,7 +247,7 @@ function fillStageSelects() {
 
 function renderStats() {
   $("#stat-total").textContent = state.batches.length;
-  $("#stat-orders").textContent = state.batches.reduce((total, batch) => total + Number(batch.count || 0), 0).toLocaleString("zh-CN");
+  $("#stat-orders").textContent = state.batches.reduce((total, batch) => total + getBatchTicketCount(batch), 0).toLocaleString("zh-CN");
   $("#stat-pending").textContent = state.batches
     .reduce((total, batch) => total + batch.events.filter((event) => !event.pushed).length, 0)
     .toLocaleString("zh-CN");
@@ -257,15 +277,17 @@ function renderBatchList() {
     .sort((a, b) => newestTime(b).localeCompare(newestTime(a)))
     .map((batch) => {
       const stage = getStage(batch.stageKey);
+      const latest = latestEvent(batch);
       const pending = batch.events.filter((event) => !event.pushed).length;
       return `
         <button class="batch-card ${batch.id === selectedBatchId ? "active" : ""}" type="button" draggable="true" data-batch-id="${escapeAttr(batch.id)}" title="可拖动到另一个批次上合并">
           <strong>${escapeHtml(batch.name)}</strong>
           <div class="badge-row">
             <span class="badge">${escapeHtml(stage?.name ?? "未设置")}</span>
-            <span class="badge">${Number(batch.count || 0).toLocaleString("zh-CN")} 票</span>
+            <span class="badge">${getBatchTicketCount(batch).toLocaleString("zh-CN")} 票</span>
             <span class="badge ${pending ? "warn" : "ok"}">${pending ? `${pending} 条待推送` : "已推送"}</span>
           </div>
+          <p class="batch-latest">最新状态：${escapeHtml(latest?.content ?? "暂无轨迹")} · ${latest ? (latest.pushed ? "已推送" : "待推送") : "未推送"}</p>
           <p>${escapeHtml(batch.destination || "未填目的地")} · 最新 ${formatDisplayTime(newestTime(batch))}</p>
         </button>
       `;
@@ -296,12 +318,13 @@ function renderDetail() {
 
   const stage = getStage(batch.stageKey);
   elements.detailName.textContent = batch.name;
-  elements.detailMeta.textContent = `${Number(batch.count || 0).toLocaleString("zh-CN")} 票 · ${batch.destination || "未填目的地"} · 当前节点：${stage?.name ?? "未设置"}`;
+  elements.detailNameInput.value = batch.name;
+  elements.detailMeta.textContent = `${getBatchTicketCount(batch).toLocaleString("zh-CN")} 票 · ${batch.destination || "未填目的地"} · 当前节点：${stage?.name ?? "未设置"}`;
   elements.detailStage.value = batch.stageKey;
   elements.detailTime.value = toInputDateTime(newestTime(batch));
   elements.detailType.value = stage?.type ?? "普通";
   elements.eventContent.value = renderTemplate(stage?.template ?? "", batch);
-  elements.numberCount.textContent = batch.numbers.length;
+  elements.numberCount.textContent = getBatchTicketCount(batch).toLocaleString("zh-CN");
   elements.detailNumbers.value = batch.numbers.join("\n");
 
   renderTimeline(batch);
@@ -317,7 +340,38 @@ function renderTimeline(batch) {
 
   elements.timeline.innerHTML = events
     .map(
-      (event) => `
+      (event) => {
+        if (event.id === editingEventId) {
+          return `
+      <article class="timeline-item editing">
+        <time>${formatDisplayTime(event.time)}</time>
+        <div class="timeline-edit-form" data-event-id="${escapeAttr(event.id)}">
+          <label>
+            节点
+            <select data-field="stageKey">${renderStageOptions(event.stageKey)}</select>
+          </label>
+          <label>
+            时间
+            <input data-field="time" type="datetime-local" value="${escapeAttr(toInputDateTime(event.time))}" />
+          </label>
+          <label>
+            类型
+            <select data-field="type">${renderTypeOptions(event.type || "普通")}</select>
+          </label>
+          <label class="timeline-edit-content">
+            内容
+            <textarea data-field="content" rows="3">${escapeHtml(event.content)}</textarea>
+          </label>
+        </div>
+        <div class="timeline-actions">
+          <button class="mini-button" type="button" data-action="save-edit" data-event-id="${escapeAttr(event.id)}">保存</button>
+          <button class="mini-button" type="button" data-action="cancel-edit" data-event-id="${escapeAttr(event.id)}">取消</button>
+        </div>
+      </article>
+    `;
+        }
+
+        return `
       <article class="timeline-item">
         <time>${formatDisplayTime(event.time)}</time>
         <p>
@@ -327,11 +381,13 @@ function renderTimeline(batch) {
           <span class="badge ${event.pushed ? "ok" : "warn"}">${event.pushed ? "已推送" : "待推送"}</span>
         </p>
         <div class="timeline-actions">
+          <button class="mini-button" type="button" data-action="edit" data-event-id="${escapeAttr(event.id)}">编辑</button>
           <button class="mini-button" type="button" data-action="toggle" data-event-id="${escapeAttr(event.id)}">${event.pushed ? "撤回" : "已推"}</button>
           <button class="mini-button" type="button" data-action="remove" data-event-id="${escapeAttr(event.id)}">删</button>
         </div>
       </article>
     `
+      }
     )
     .join("");
 
@@ -339,19 +395,38 @@ function renderTimeline(batch) {
     button.addEventListener("click", () => {
       if (button.dataset.action === "toggle") {
         toggleEventPushed(batch.id, button.dataset.eventId);
-      } else {
+      } else if (button.dataset.action === "remove") {
         removeEvent(batch.id, button.dataset.eventId);
+      } else if (button.dataset.action === "edit") {
+        editingEventId = button.dataset.eventId;
+        renderTimeline(batch);
+      } else if (button.dataset.action === "cancel-edit") {
+        editingEventId = null;
+        renderTimeline(batch);
+      } else if (button.dataset.action === "save-edit") {
+        saveEventEdit(batch.id, button.dataset.eventId);
       }
     });
   });
 }
 
 function renderPushOutput(batch) {
-  const pendingEvents = [...batch.events].filter((event) => !event.pushed).sort((a, b) => a.time.localeCompare(b.time));
-  const source = pendingEvents.length ? pendingEvents : [...batch.events].sort((a, b) => a.time.localeCompare(b.time));
+  const source = [...batch.events].sort((a, b) => a.time.localeCompare(b.time));
   elements.pushOutput.value = source
     .map((event) => `${formatSystemTime(event.time)}\t${event.content}\t${event.type || "普通"}`)
     .join("\n");
+}
+
+function renderStageOptions(selectedKey) {
+  return state.stages
+    .map((stage) => `<option value="${escapeAttr(stage.key)}" ${stage.key === selectedKey ? "selected" : ""}>${escapeHtml(stage.name)}</option>`)
+    .join("");
+}
+
+function renderTypeOptions(selectedType) {
+  return ["普通", "送交清关", "派送", "签收", "异常"]
+    .map((type) => `<option value="${escapeAttr(type)}" ${type === selectedType ? "selected" : ""}>${escapeHtml(type)}</option>`)
+    .join("");
 }
 
 function renderTemplates() {
@@ -399,10 +474,11 @@ function renderSafety() {
           <article class="safety-item">
             <div>
               <strong>${escapeHtml(item.data.name)}</strong>
-              <p>${Number(item.data.count || 0).toLocaleString("zh-CN")} 票 · 删除于 ${formatDisplayTime(item.deletedAt)}</p>
+              <p>${getBatchTicketCount(item.data).toLocaleString("zh-CN")} 票 · 删除于 ${formatDisplayTime(item.deletedAt)}</p>
             </div>
             <div class="safety-actions">
               <button class="mini-button" type="button" data-action="restore-batch" data-trash-id="${escapeAttr(item.id)}">恢复</button>
+              <button class="mini-button danger-mini" type="button" data-action="delete-trash" data-trash-id="${escapeAttr(item.id)}">彻底删除</button>
             </div>
           </article>
         `
@@ -432,6 +508,9 @@ function renderSafety() {
 
   elements.trashList.querySelectorAll("[data-action='restore-batch']").forEach((button) => {
     button.addEventListener("click", () => restoreTrashedBatch(button.dataset.trashId));
+  });
+  elements.trashList.querySelectorAll("[data-action='delete-trash']").forEach((button) => {
+    button.addEventListener("click", () => deleteTrashedBatch(button.dataset.trashId));
   });
   elements.backupList.querySelectorAll("[data-action='restore-backup']").forEach((button) => {
     button.addEventListener("click", () => restoreBackup(button.dataset.backupId));
@@ -508,6 +587,7 @@ function addEventToSelectedBatch() {
   batch.stageKey = stageKey;
   batch.events.push(makeEvent(stageKey, time, type, content, false));
   sortBatchEvents(batch);
+  syncBatchDerivedFields(batch);
   saveState();
   render();
   showToast("轨迹已加入待推送");
@@ -529,9 +609,27 @@ function markSelectedBatchPushed() {
   batch.events.forEach((event) => {
     event.pushed = true;
   });
+  syncBatchDerivedFields(batch);
   saveState();
   render();
   showToast("当前批次已全部标记为已推送");
+}
+
+function saveSelectedBatchName() {
+  const batch = getSelectedBatch();
+  if (!batch) return;
+
+  const name = elements.detailNameInput.value.trim();
+  if (!name) {
+    showToast("批次名称不能为空");
+    elements.detailNameInput.focus();
+    return;
+  }
+
+  batch.name = name;
+  saveState();
+  render();
+  showToast("批次名称已更新");
 }
 
 function copyPushOutput() {
@@ -553,9 +651,22 @@ function saveDetailNumbers() {
 
   batch.numbers = parseLines(elements.detailNumbers.value);
   batch.count = batch.numbers.length;
+  syncBatchDerivedFields(batch);
   saveState();
   render();
   showToast("单号已保存");
+}
+
+function updateSelectedBatchNumbersFromTextarea() {
+  const batch = getSelectedBatch();
+  if (!batch) return;
+
+  batch.numbers = parseLines(elements.detailNumbers.value);
+  batch.count = batch.numbers.length;
+  syncBatchDerivedFields(batch);
+  elements.numberCount.textContent = getBatchTicketCount(batch).toLocaleString("zh-CN");
+  queueSaveState();
+  renderStats();
 }
 
 function deleteSelectedBatch() {
@@ -584,6 +695,7 @@ function duplicateSelectedBatch() {
   copy.id = makeId();
   copy.name = `${batch.name} 副本`;
   copy.events = copy.events.map((event) => ({ ...event, id: makeId(), pushed: false }));
+  syncBatchDerivedFields(copy);
   state.batches.unshift(copy);
   selectedBatchId = copy.id;
   saveState();
@@ -598,21 +710,27 @@ function splitSelectedBatch() {
     return;
   }
 
-  const countText = prompt("要拆出多少票？", Math.floor(Number(batch.count || 0) / 2).toString());
+  const ticketCount = getBatchTicketCount(batch);
+  const countText = prompt("要拆出多少票？", Math.floor(ticketCount / 2).toString());
   const splitCount = Number(countText);
-  if (!splitCount || splitCount <= 0 || splitCount >= Number(batch.count || 0)) {
+  if (!splitCount || splitCount <= 0 || splitCount >= ticketCount) {
     showToast("拆分数量需要小于原批次票数");
     return;
   }
 
-  const splitNumbers = batch.numbers.splice(0, Math.min(splitCount, batch.numbers.length));
-  batch.count = Number(batch.count || 0) - splitCount;
+  const hasNumbers = batch.numbers.length > 0;
+  const splitNumbers = hasNumbers ? batch.numbers.splice(0, Math.min(splitCount, batch.numbers.length)) : [];
+  if (!hasNumbers) {
+    batch.count = ticketCount - splitCount;
+  }
   const newBatch = structuredClone(batch);
   newBatch.id = makeId();
   newBatch.name = `${batch.name} 子批`;
   newBatch.count = splitCount;
   newBatch.numbers = splitNumbers;
   newBatch.events = newBatch.events.map((event) => ({ ...event, id: makeId(), pushed: false }));
+  syncBatchDerivedFields(batch);
+  syncBatchDerivedFields(newBatch);
   state.batches.unshift(newBatch);
   selectedBatchId = newBatch.id;
   saveState();
@@ -666,9 +784,9 @@ function openMergeModal(sourceId, targetId) {
 
   pendingMerge = { sourceId, targetId };
   elements.mergeSourceName.textContent = source.name;
-  elements.mergeSourceMeta.textContent = `${Number(source.count || 0).toLocaleString("zh-CN")} 票 · ${getStage(source.stageKey)?.name ?? "未设置"}`;
+  elements.mergeSourceMeta.textContent = `${getBatchTicketCount(source).toLocaleString("zh-CN")} 票 · ${getStage(source.stageKey)?.name ?? "未设置"}`;
   elements.mergeTargetName.textContent = target.name;
-  elements.mergeTargetMeta.textContent = `${Number(target.count || 0).toLocaleString("zh-CN")} 票 · ${getStage(target.stageKey)?.name ?? "未设置"}`;
+  elements.mergeTargetMeta.textContent = `${getBatchTicketCount(target).toLocaleString("zh-CN")} 票 · ${getStage(target.stageKey)?.name ?? "未设置"}`;
   elements.mergeSummary.textContent = `合并后将保留「${target.name}」，并删除「${source.name}」。`;
 
   const stageWarning =
@@ -696,7 +814,6 @@ function confirmMergeBatches() {
   }
 
   createBackup(`合并批次前：${source.name} -> ${target.name}`);
-  target.count = Number(target.count || 0) + Number(source.count || 0);
   target.numbers = uniqueValues([...target.numbers, ...source.numbers]);
   target.events = uniqueEvents([...target.events, ...source.events]);
   sortBatchEvents(target);
@@ -707,6 +824,7 @@ function confirmMergeBatches() {
   }
 
   target.name = mergeBatchName(target.name, source.name);
+  syncBatchDerivedFields(target);
   state.batches = state.batches.filter((batch) => batch.id !== source.id);
   selectedBatchId = target.id;
   closeMergeModal();
@@ -721,8 +839,36 @@ function toggleEventPushed(batchId, eventId) {
   if (!event) return;
 
   event.pushed = !event.pushed;
+  syncBatchDerivedFields(batch);
   saveState();
   render();
+}
+
+function saveEventEdit(batchId, eventId) {
+  const batch = state.batches.find((item) => item.id === batchId);
+  const event = batch?.events.find((item) => item.id === eventId);
+  const form = elements.timeline.querySelector(`.timeline-edit-form[data-event-id="${cssEscape(eventId)}"]`);
+  if (!batch || !event || !form) return;
+
+  const stageKey = form.querySelector("[data-field='stageKey']").value;
+  const stage = getStage(stageKey);
+  const content = form.querySelector("[data-field='content']").value.trim();
+  if (!content) {
+    showToast("轨迹内容不能为空");
+    form.querySelector("[data-field='content']").focus();
+    return;
+  }
+
+  event.stageKey = stageKey;
+  event.time = normalizeInputTime(form.querySelector("[data-field='time']").value) || toInputDateTime(new Date());
+  event.type = form.querySelector("[data-field='type']").value || stage?.type || "普通";
+  event.content = content;
+  sortBatchEvents(batch);
+  syncBatchDerivedFields(batch);
+  editingEventId = null;
+  saveState();
+  render();
+  showToast("轨迹已更新");
 }
 
 function removeEvent(batchId, eventId) {
@@ -731,6 +877,7 @@ function removeEvent(batchId, eventId) {
 
   createBackup(`删除轨迹前：${batch.name}`);
   batch.events = batch.events.filter((event) => event.id !== eventId);
+  syncBatchDerivedFields(batch);
   saveState();
   render();
   showToast("轨迹已删除，已自动留快照");
@@ -831,7 +978,7 @@ function downloadCsv() {
       .forEach((event) => {
         rows.push([
           batch.name,
-          batch.count,
+          getBatchTicketCount(batch),
           batch.destination,
           formatSystemTime(event.time),
           event.content,
@@ -928,19 +1075,36 @@ function startCloudSync() {
 
   const interval = Math.max(5000, cloudConfig.pullIntervalMs || 15000);
   setInterval(() => {
+    if (hasUnsyncedLocalChanges()) {
+      updateCloudStatus("本地修改待上传", "warn");
+      return;
+    }
     loadFromCloud({ silent: true, confirmOverwrite: false, onlyIfNewer: true });
   }, interval);
 }
 
 function queueCloudSync() {
   if (isApplyingRemote || !cloudConfig.enabled) return;
+  if (cloudSaveInFlight) {
+    needsCloudSyncAfterFlight = true;
+    return;
+  }
   clearTimeout(cloudSaveTimer);
   cloudSaveTimer = setTimeout(() => syncToCloudNow(true), 900);
 }
 
 async function syncToCloudNow(silent = false) {
   if (!ensureCloudConfig()) return;
+  if (cloudSaveInFlight) {
+    needsCloudSyncAfterFlight = true;
+    return;
+  }
 
+  const revisionToSync = localRevision;
+  const payload = structuredClone(state);
+  const updatedAt = new Date().toISOString();
+  cloudSaveInFlight = true;
+  needsCloudSyncAfterFlight = false;
   updateCloudStatus("正在上传", "warn");
   try {
     const response = await fetch(`${cloudConfig.url}/rest/v1/${encodeURIComponent(cloudConfig.table)}?on_conflict=id`, {
@@ -948,8 +1112,8 @@ async function syncToCloudNow(silent = false) {
       headers: cloudHeaders({ prefer: "resolution=merge-duplicates,return=minimal" }),
       body: JSON.stringify({
         id: cloudConfig.recordId,
-        payload: state,
-        updated_at: new Date().toISOString(),
+        payload,
+        updated_at: updatedAt,
       }),
     });
 
@@ -957,12 +1121,18 @@ async function syncToCloudNow(silent = false) {
       throw new Error(await response.text());
     }
 
-    lastCloudVersion = new Date().toISOString();
+    lastCloudVersion = updatedAt;
+    lastSyncedRevision = Math.max(lastSyncedRevision, revisionToSync);
     updateCloudStatus("云端已同步", "ok");
     if (!silent) showToast("当前数据已上传到云端");
   } catch (error) {
     updateCloudStatus("同步失败", "error");
     showToast(`云同步失败：${formatError(error)}`);
+  } finally {
+    cloudSaveInFlight = false;
+    if (needsCloudSyncAfterFlight || localRevision > lastSyncedRevision) {
+      queueCloudSync();
+    }
   }
 }
 
@@ -970,6 +1140,10 @@ async function loadFromCloud(options = {}) {
   if (!ensureCloudConfig()) return;
   const { silent = false, confirmOverwrite = false, onlyIfNewer = false } = options;
   if (confirmOverwrite && !confirm("从云端读取会覆盖当前浏览器本地数据，确定继续？")) return;
+  if (!confirmOverwrite && hasUnsyncedLocalChanges()) {
+    updateCloudStatus("本地修改待上传", "warn");
+    return;
+  }
 
   updateCloudStatus("正在读取", "warn");
   try {
@@ -985,6 +1159,10 @@ async function loadFromCloud(options = {}) {
 
     const rows = await response.json();
     if (!rows.length || !rows[0].payload) {
+      if (!confirmOverwrite && hasUnsyncedLocalChanges()) {
+        updateCloudStatus("本地修改待上传", "warn");
+        return;
+      }
       isApplyingRemote = true;
       state = normalizeState({});
       localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
@@ -998,6 +1176,10 @@ async function loadFromCloud(options = {}) {
 
     const remoteState = normalizeState(rows[0].payload);
     const remoteVersion = rows[0].updated_at || "";
+    if (!confirmOverwrite && hasUnsyncedLocalChanges()) {
+      updateCloudStatus("本地修改待上传", "warn");
+      return;
+    }
     if (onlyIfNewer && remoteVersion && remoteVersion === lastCloudVersion) {
       updateCloudStatus("云端已同步", "ok");
       return;
@@ -1008,6 +1190,7 @@ async function loadFromCloud(options = {}) {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
     selectedBatchId = state.batches[0]?.id ?? null;
     lastCloudVersion = remoteVersion;
+    lastSyncedRevision = localRevision;
     isApplyingRemote = false;
     render();
     updateCloudStatus("已读取云端", "ok");
@@ -1017,6 +1200,10 @@ async function loadFromCloud(options = {}) {
     updateCloudStatus("读取失败", "error");
     showToast(`云端读取失败：${formatError(error)}`);
   }
+}
+
+function hasUnsyncedLocalChanges() {
+  return cloudSaveInFlight || localRevision > lastSyncedRevision || Date.now() - lastLocalChangeAt < 1500;
 }
 
 function ensureCloudConfig() {
@@ -1068,7 +1255,7 @@ function makeId() {
 }
 
 function normalizeState(value) {
-  return {
+  const normalized = {
     stages: Array.isArray(value?.stages) && value.stages.length ? value.stages : structuredClone(defaultStages),
     batches: Array.isArray(value?.batches) ? value.batches : [],
     trash: {
@@ -1076,6 +1263,11 @@ function normalizeState(value) {
     },
     backups: Array.isArray(value?.backups) ? value.backups : [],
   };
+  normalized.batches.forEach(syncBatchDerivedFields);
+  normalized.trash.batches.forEach((item) => {
+    if (item?.data) syncBatchDerivedFields(item.data);
+  });
+  return normalized;
 }
 
 function createBackup(reason) {
@@ -1107,6 +1299,18 @@ function restoreTrashedBatch(trashId) {
   saveState();
   render();
   showToast("批次已恢复");
+}
+
+function deleteTrashedBatch(trashId) {
+  const item = state.trash.batches.find((entry) => entry.id === trashId);
+  if (!item) return;
+  if (!confirm(`确定彻底删除「${item.data.name}」吗？这个操作不能从回收站恢复。`)) return;
+
+  createBackup(`彻底删除回收站批次前：${item.data.name}`);
+  state.trash.batches = state.trash.batches.filter((entry) => entry.id !== trashId);
+  saveState();
+  render();
+  showToast("批次已彻底删除");
 }
 
 function restoreBackup(backupId) {
@@ -1148,6 +1352,27 @@ function getStage(key) {
   return state.stages.find((stage) => stage.key === key);
 }
 
+function getBatchTicketCount(batch) {
+  if (!batch) return 0;
+  if (Array.isArray(batch.numbers) && batch.numbers.length) return batch.numbers.length;
+  return Number(batch.count || 0);
+}
+
+function latestEvent(batch) {
+  return [...(batch?.events || [])].sort((a, b) => b.time.localeCompare(a.time))[0] || null;
+}
+
+function syncBatchDerivedFields(batch) {
+  if (!batch) return batch;
+  batch.numbers = Array.isArray(batch.numbers) ? batch.numbers.map((value) => String(value || "").trim()).filter(Boolean) : [];
+  batch.count = getBatchTicketCount(batch);
+  const newestEvent = latestEvent(batch);
+  if (newestEvent) {
+    batch.stageKey = newestEvent.stageKey;
+  }
+  return batch;
+}
+
 function findStageByName(name) {
   const normalized = name.toLowerCase();
   return state.stages.find((stage) => stage.name.toLowerCase() === normalized || stage.key.toLowerCase() === normalized);
@@ -1183,6 +1408,11 @@ function mergeBatchName(targetName, sourceName) {
 function newestTime(batch) {
   const times = [batch.createdAt, ...batch.events.map((event) => event.time)].filter(Boolean);
   return times.sort().at(-1) || toInputDateTime(new Date());
+}
+
+function cssEscape(value) {
+  if (window.CSS?.escape) return CSS.escape(value);
+  return String(value).replaceAll("\\", "\\\\").replaceAll('"', '\\"');
 }
 
 function parseLines(text) {
