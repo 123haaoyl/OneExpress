@@ -332,9 +332,9 @@ function renderDetail() {
 }
 
 function renderTimeline(batch) {
-  const events = [...batch.events].sort((a, b) => b.time.localeCompare(a.time));
+  const events = [...batch.events].filter((event) => event.pushed).sort((a, b) => a.time.localeCompare(b.time));
   if (!events.length) {
-    elements.timeline.innerHTML = `<div class="empty-state"><p>还没有轨迹，选择节点后加入轨迹</p></div>`;
+    elements.timeline.innerHTML = `<div class="empty-state"><p>还没有已推送轨迹，待推送内容会显示在下方批量推送内容里</p></div>`;
     return;
   }
 
@@ -411,7 +411,7 @@ function renderTimeline(batch) {
 }
 
 function renderPushOutput(batch) {
-  const source = [...batch.events].sort((a, b) => a.time.localeCompare(b.time));
+  const source = [...batch.events].filter((event) => !event.pushed).sort((a, b) => a.time.localeCompare(b.time));
   elements.pushOutput.value = source
     .map((event) => `${formatSystemTime(event.time)}\t${event.content}\t${event.type || "普通"}`)
     .join("\n");
