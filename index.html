@@ -210,18 +210,8 @@
                 <h2>回收站</h2>
                 <p>删除的批次会先放在这里，可以恢复，也可以彻底删除。</p>
               </div>
-              <button class="secondary-button" id="create-backup-btn" type="button">手动快照</button>
             </div>
-            <div class="safety-grid">
-              <div>
-                <h3>已删除批次</h3>
-                <div id="trash-list" class="safety-list"></div>
-              </div>
-              <div>
-                <h3>自动快照</h3>
-                <div id="backup-list" class="safety-list"></div>
-              </div>
-            </div>
+            <div id="trash-list" class="safety-list"></div>
           </section>
         </section>
 
@@ -250,7 +240,7 @@
             </section>
             <section class="panel">
               <h2>备份 / 恢复</h2>
-              <p class="muted">系统会在删除、清空、恢复前自动留快照；也可以手动导出 JSON。</p>
+              <p class="muted">手动导出 JSON，或粘贴 JSON 恢复数据。</p>
               <div class="backup-actions">
                 <button class="secondary-button" id="download-json-btn" type="button">下载JSON备份</button>
                 <button class="secondary-button" id="copy-json-btn" type="button">复制JSON</button>
