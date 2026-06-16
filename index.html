@@ -154,6 +154,27 @@
                   <textarea id="event-content" rows="2"></textarea>
                 </label>
 
+                <section class="signed-update-panel">
+                  <div class="section-heading">
+                    <div>
+                      <h3>已更新签收</h3>
+                      <p>每天粘贴 USPS 实际签收单号，筛出未标记过签收的单号。</p>
+                    </div>
+                    <button class="secondary-button" id="filter-signed-update-btn" type="button">筛选单号</button>
+                  </div>
+                  <textarea id="signed-update-input" rows="5" placeholder="粘贴今天 USPS 已签收的单号，一行一个"></textarea>
+                  <div class="signed-update-summary" id="signed-update-summary">待筛选</div>
+                  <div class="signed-update-actions">
+                    <button class="primary-button" id="mark-signed-update-btn" type="button">标记已签收</button>
+                    <button class="secondary-button" id="copy-new-signed-btn" type="button">复制未标记单号</button>
+                  </div>
+                  <textarea id="signed-update-output" class="output-area" rows="4" readonly placeholder="筛选出的未标记签收单号会显示在这里"></textarea>
+                  <details class="signed-history">
+                    <summary>查看已标记签收，共 <span id="signed-update-count">0</span> 单</summary>
+                    <textarea id="signed-update-history" class="output-area" rows="5" readonly></textarea>
+                  </details>
+                </section>
+
                 <div class="timeline-header">
                   <div>
                     <h3>轨迹链</h3>

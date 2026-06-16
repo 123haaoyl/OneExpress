@@ -82,6 +82,14 @@ const elements = {
   detailTime: $("#detail-time"),
   detailType: $("#detail-type"),
   eventContent: $("#event-content"),
+  signedUpdateInput: $("#signed-update-input"),
+  signedUpdateSummary: $("#signed-update-summary"),
+  signedUpdateOutput: $("#signed-update-output"),
+  signedUpdateCount: $("#signed-update-count"),
+  signedUpdateHistory: $("#signed-update-history"),
+  filterSignedUpdateBtn: $("#filter-signed-update-btn"),
+  markSignedUpdateBtn: $("#mark-signed-update-btn"),
+  copyNewSignedBtn: $("#copy-new-signed-btn"),
   timeline: $("#timeline"),
   pushOutput: $("#push-output"),
   numberCount: $("#number-count"),
@@ -155,6 +163,10 @@ function bindEvents() {
   $("#copy-push-btn").addEventListener("click", copyPushOutput);
   $("#save-numbers-btn").addEventListener("click", saveDetailNumbers);
   $("#save-batch-name-btn").addEventListener("click", saveSelectedBatchName);
+  elements.filterSignedUpdateBtn.addEventListener("click", updateSignedUpdatePreview);
+  elements.markSignedUpdateBtn.addEventListener("click", markSignedUpdateNumbers);
+  elements.copyNewSignedBtn.addEventListener("click", copyNewSignedNumbers);
+  elements.signedUpdateInput.addEventListener("input", updateSignedUpdatePreview);
   $("#delete-batch-btn").addEventListener("click", deleteSelectedBatch);
   $("#duplicate-batch-btn").addEventListener("click", duplicateSelectedBatch);
   $("#split-batch-btn").addEventListener("click", splitSelectedBatch);
@@ -331,6 +343,7 @@ function renderDetail() {
 
   renderTimeline(batch);
   renderPushOutput(batch);
+  renderSignedUpdate(batch);
 }
 
 function renderTimeline(batch) {
@@ -593,6 +606,59 @@ function addEventToSelectedBatch() {
   saveState();
   render();
   showToast("轨迹已加入待推送");
+}
+
+function renderSignedUpdate(batch) {
+  const signed = uniqueValues(batch.signedNumbers || []);
+  elements.signedUpdateCount.textContent = signed.length.toLocaleString("zh-CN");
+  elements.signedUpdateHistory.value = signed.join("\n");
+  updateSignedUpdatePreview();
+}
+
+function updateSignedUpdatePreview() {
+  const batch = getSelectedBatch();
+  if (!batch) {
+    elements.signedUpdateSummary.textContent = "请选择一个批次";
+    elements.signedUpdateOutput.value = "";
+    return [];
+  }
+
+  const result = getSignedUpdateCandidates(batch, parseLines(elements.signedUpdateInput.value));
+  elements.signedUpdateSummary.textContent = result.input.length
+    ? `输入 ${result.input.length} 单，未标记 ${result.ready.length}，已标记 ${result.duplicate.length}`
+    : "待筛选";
+  elements.signedUpdateOutput.value = result.ready.join("\n");
+  return result.ready;
+}
+
+function markSignedUpdateNumbers() {
+  const batch = getSelectedBatch();
+  if (!batch) return;
+
+  const ready = updateSignedUpdatePreview();
+  if (!ready.length) {
+    showToast("没有新的签收单号可标记");
+    return;
+  }
+
+  batch.signedNumbers = uniqueValues([...(batch.signedNumbers || []), ...ready]);
+  saveState();
+  render();
+  showToast(`已标记 ${ready.length} 单签收`);
+}
+
+function copyNewSignedNumbers() {
+  const ready = updateSignedUpdatePreview();
+  const text = ready.join("\n");
+  if (!text.trim()) {
+    showToast("没有可复制的未标记单号");
+    return;
+  }
+
+  navigator.clipboard.writeText(text).then(
+    () => showToast("未标记签收单号已复制"),
+    () => showToast("复制失败，请手动复制")
+  );
 }
 
 function syncEventEditorFromStage() {
@@ -1287,8 +1353,15 @@ function makeId() {
 }
 
 function normalizeState(value) {
+  const stages = Array.isArray(value?.stages) && value.stages.length ? value.stages : structuredClone(defaultStages);
+  defaultStages.forEach((stage) => {
+    if (!stages.some((item) => item.key === stage.key)) {
+      stages.push(structuredClone(stage));
+    }
+  });
+
   const normalized = {
-    stages: Array.isArray(value?.stages) && value.stages.length ? value.stages : structuredClone(defaultStages),
+    stages,
     batches: Array.isArray(value?.batches) ? value.batches : [],
     trash: {
       batches: Array.isArray(value?.trash?.batches) ? value.trash.batches : [],
@@ -1398,11 +1471,32 @@ function syncBatchDerivedFields(batch) {
   if (!batch) return batch;
   batch.numbers = Array.isArray(batch.numbers) ? batch.numbers.map((value) => String(value || "").trim()).filter(Boolean) : [];
   batch.count = getBatchTicketCount(batch);
+  batch.signedNumbers = uniqueValues(batch.signedNumbers || []);
+  batch.events = Array.isArray(batch.events) ? batch.events : [];
   const newestEvent = latestEvent(batch);
   if (newestEvent) {
     batch.stageKey = newestEvent.stageKey;
   }
   return batch;
+}
+
+function getSignedUpdateCandidates(batch, numbers) {
+  const requested = uniqueValues(numbers);
+  const signedNumbers = new Set(uniqueValues(batch?.signedNumbers || []));
+  const result = {
+    input: requested,
+    ready: [],
+    duplicate: [],
+  };
+
+  requested.forEach((number) => {
+    if (signedNumbers.has(number)) {
+      result.duplicate.push(number);
+    } else {
+      result.ready.push(number);
+    }
+  });
+  return result;
 }
 
 function findStageByName(name) {

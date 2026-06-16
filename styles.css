@@ -524,6 +524,31 @@ textarea:focus {
   align-self: end;
 }
 
+.signed-update-panel {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  background: var(--surface-soft);
+}
+
+.signed-update-panel h3 {
+  margin: 0;
+}
+
+.signed-update-summary {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.signed-update-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
 .timeline {
   display: grid;
   gap: 9px;
