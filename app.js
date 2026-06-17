@@ -328,7 +328,7 @@ function renderDetail() {
   elements.detailNameInput.value = batch.name;
   elements.detailMeta.textContent = `${getBatchTicketCount(batch).toLocaleString("zh-CN")} 票 · ${batch.destination || "未填目的地"} · 当前节点：${stage?.name ?? "未设置"}`;
   elements.detailStage.value = batch.stageKey;
-  elements.detailTime.value = toInputDateTime(newestTime(batch));
+  elements.detailTime.value = toInputDateTime(new Date());
   elements.detailType.value = stage?.type ?? "普通";
   elements.eventContent.value = renderTemplate(stage?.template ?? "", batch);
   elements.numberCount.textContent = getBatchTicketCount(batch).toLocaleString("zh-CN");
@@ -633,6 +633,7 @@ function syncEventEditorFromStage() {
   const stage = getStage(elements.detailStage.value);
   if (!batch || !stage) return;
 
+  elements.detailTime.value = toInputDateTime(new Date());
   elements.detailType.value = stage.type;
   elements.eventContent.value = renderTemplate(stage.template, batch);
 }
@@ -1191,6 +1192,12 @@ async function loadFromCloud(options = {}) {
 
     const rows = await response.json();
     if (!rows.length || !rows[0].payload) {
+      if (!confirmOverwrite && hasMeaningfulSavedData(state)) {
+        updateCloudStatus("云端为空，保留本地", "warn");
+        deferredCloudPull = false;
+        queueCloudSync();
+        return;
+      }
       if (!confirmOverwrite && shouldDeferRemoteApply()) {
         updateCloudStatus("本地修改待上传", "warn");
         deferredCloudPull = true;
@@ -1209,6 +1216,12 @@ async function loadFromCloud(options = {}) {
 
     const remoteState = normalizeState(rows[0].payload);
     const remoteVersion = rows[0].updated_at || "";
+    if (!confirmOverwrite && !hasMeaningfulSavedData(remoteState) && hasMeaningfulSavedData(state)) {
+      updateCloudStatus("云端为空，保留本地", "warn");
+      deferredCloudPull = false;
+      queueCloudSync();
+      return;
+    }
     if (!confirmOverwrite && shouldDeferRemoteApply()) {
       updateCloudStatus("本地修改待上传", "warn");
       deferredCloudPull = true;
@@ -1243,6 +1256,10 @@ function hasUnsyncedLocalChanges() {
 
 function shouldDeferRemoteApply() {
   return hasUnsyncedLocalChanges() || isUserEditing();
+}
+
+function hasMeaningfulSavedData(value) {
+  return Boolean(value?.batches?.length || value?.trash?.batches?.length);
 }
 
 function isUserEditing() {
