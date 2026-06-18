@@ -163,6 +163,7 @@ function bindEvents() {
   $("#copy-push-btn").addEventListener("click", copyPushOutput);
   $("#save-numbers-btn").addEventListener("click", saveDetailNumbers);
   $("#save-batch-name-btn").addEventListener("click", saveSelectedBatchName);
+  $("#export-selected-batch-btn").addEventListener("click", downloadSelectedBatchCsv);
   elements.filterSignedUpdateBtn.addEventListener("click", updateSignedUpdatePreview);
   elements.markSignedUpdateBtn.addEventListener("click", markSignedUpdateNumbers);
   elements.copyNewSignedBtn.addEventListener("click", copyNewSignedNumbers);
@@ -170,7 +171,6 @@ function bindEvents() {
   $("#delete-batch-btn").addEventListener("click", deleteSelectedBatch);
   $("#duplicate-batch-btn").addEventListener("click", duplicateSelectedBatch);
   $("#split-batch-btn").addEventListener("click", splitSelectedBatch);
-  $("#export-csv-btn").addEventListener("click", downloadCsv);
   $("#add-template-btn").addEventListener("click", addTemplate);
   $("#import-btn").addEventListener("click", importCsv);
   $("#download-json-btn").addEventListener("click", downloadJson);
@@ -1062,25 +1062,30 @@ function importCsv() {
   showToast(`已导入 ${imported.length} 个批次`);
 }
 
-function downloadCsv() {
-  const rows = [["批次名称", "票数", "目的地", "节点时间", "轨迹内容", "类型", "是否已推送", "单号"]];
-  state.batches.forEach((batch) => {
-    batch.events
-      .sort((a, b) => a.time.localeCompare(b.time))
-      .forEach((event) => {
-        rows.push([
-          batch.name,
-          getBatchTicketCount(batch),
-          batch.destination,
-          formatSystemTime(event.time),
-          event.content,
-          event.type || "普通",
-          event.pushed ? "是" : "否",
-          batch.numbers.join(";"),
-        ]);
-      });
+function downloadSelectedBatchCsv() {
+  const batch = getSelectedBatch();
+  if (!batch) {
+    showToast("请先选择一个批次");
+    return;
+  }
+
+  const numbers = Array.isArray(batch.numbers) ? batch.numbers.filter(Boolean) : [];
+  if (!numbers.length) {
+    showToast("当前批次没有可导出的单号");
+    return;
+  }
+
+  const latest = latestEvent(batch);
+  const latestContent = latest?.content || "";
+  const latestTime = latest?.time ? formatSystemTime(latest.time) : "";
+  const rows = [["单号", "当前最新轨迹", "时间"]];
+
+  numbers.forEach((number) => {
+    rows.push([number, latestContent, latestTime]);
   });
-  downloadFile(`批次轨迹_${fileDate()}.csv`, "\ufeff" + toCsv(rows), "text/csv;charset=utf-8");
+
+  downloadFile(`${sanitizeFilename(batch.name || "批次")}_推送明细_${fileDate()}.csv`, "\ufeff" + toCsv(rows), "text/csv;charset=utf-8");
+  showToast(`已导出 ${numbers.length} 条单号`);
 }
 
 function downloadJson() {
@@ -1673,6 +1678,10 @@ function downloadFile(filename, content, type) {
   link.click();
   link.remove();
   URL.revokeObjectURL(url);
+}
+
+function sanitizeFilename(value) {
+  return String(value || "批次").replace(/[\\/:*?"<>|]+/g, "_").trim() || "批次";
 }
 
 function fileDate() {
