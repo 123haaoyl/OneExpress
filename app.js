@@ -340,7 +340,7 @@ function renderDetail() {
 }
 
 function renderTimeline(batch) {
-  const events = [...batch.events].sort((a, b) => a.time.localeCompare(b.time));
+  const events = [...batch.events].sort((a, b) => b.time.localeCompare(a.time));
   if (!events.length) {
     elements.timeline.innerHTML = `<div class="empty-state"><p>还没有轨迹，选择节点后加入轨迹</p></div>`;
     return;
