@@ -427,6 +427,14 @@ textarea:focus {
   background: var(--accent-soft);
 }
 
+.batch-card.reorder-before {
+  box-shadow: inset 0 4px 0 0 var(--accent);
+}
+
+.batch-card.reorder-after {
+  box-shadow: inset 0 -4px 0 0 var(--accent);
+}
+
 .merge-hint {
   margin-top: 12px;
   padding: 10px 12px;

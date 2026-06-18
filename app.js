@@ -47,6 +47,7 @@ let state = loadState();
 let selectedBatchId = state.batches[0]?.id ?? null;
 let pendingMerge = null;
 let draggedBatchId = null;
+let currentDropIntent = null;
 let cloudConfig = null;
 let isApplyingRemote = false;
 let cloudSaveTimer = null;
@@ -221,6 +222,7 @@ function saveState() {
   localRevision += 1;
   lastLocalChangeAt = Date.now();
   state.batches.forEach(syncBatchDerivedFields);
+  persistBatchOrder();
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   queueCloudSync();
 }
@@ -281,13 +283,12 @@ function renderBatchList() {
   }
 
   elements.batchList.innerHTML = batches
-    .sort((a, b) => newestTime(b).localeCompare(newestTime(a)))
     .map((batch) => {
       const stage = getStage(batch.stageKey);
       const latest = latestEvent(batch);
       const pending = batch.events.filter((event) => !event.pushed).length;
       return `
-        <button class="batch-card ${batch.id === selectedBatchId ? "active" : ""}" type="button" draggable="true" data-batch-id="${escapeAttr(batch.id)}" title="可拖动到另一个批次上合并">
+        <button class="batch-card ${batch.id === selectedBatchId ? "active" : ""}" type="button" draggable="true" data-batch-id="${escapeAttr(batch.id)}" title="上半/下半调整顺序，中间区域合并">
           <strong>${escapeHtml(batch.name)}</strong>
           <div class="badge-row">
             <span class="badge">${escapeHtml(stage?.name ?? "未设置")}</span>
@@ -775,6 +776,7 @@ function splitSelectedBatch() {
 
 function handleBatchDragStart(event) {
   draggedBatchId = event.currentTarget.dataset.batchId;
+  currentDropIntent = null;
   event.currentTarget.classList.add("dragging");
   event.dataTransfer.effectAllowed = "move";
   event.dataTransfer.setData("text/plain", draggedBatchId);
@@ -782,8 +784,9 @@ function handleBatchDragStart(event) {
 
 function handleBatchDragEnd(event) {
   event.currentTarget.classList.remove("dragging");
-  $$(".batch-card.drop-target").forEach((card) => card.classList.remove("drop-target"));
+  clearBatchDropStyles();
   draggedBatchId = null;
+  currentDropIntent = null;
 }
 
 function handleBatchDragOver(event) {
@@ -791,25 +794,81 @@ function handleBatchDragOver(event) {
   const sourceId = event.dataTransfer.getData("text/plain") || draggedBatchId;
   if (!sourceId || sourceId === targetId) return;
   event.preventDefault();
-  event.currentTarget.classList.add("drop-target");
+  const intent = getBatchDropIntent(event);
+  currentDropIntent = { sourceId, targetId, intent };
+  updateBatchDropStyles(targetId, intent);
   event.dataTransfer.dropEffect = "move";
 }
 
 function handleBatchDragLeave(event) {
-  event.currentTarget.classList.remove("drop-target");
+  const related = event.relatedTarget;
+  if (related && event.currentTarget.contains(related)) return;
+  clearBatchDropStyles();
 }
 
 function handleBatchDrop(event) {
   event.preventDefault();
   const sourceId = event.dataTransfer.getData("text/plain") || draggedBatchId;
   const targetId = event.currentTarget.dataset.batchId;
-  event.currentTarget.classList.remove("drop-target");
+  const intent = currentDropIntent?.targetId === targetId ? currentDropIntent.intent : getBatchDropIntent(event);
+  clearBatchDropStyles();
 
   if (!sourceId || !targetId || sourceId === targetId) {
     return;
   }
 
-  openMergeModal(sourceId, targetId);
+  if (intent === "merge") {
+    openMergeModal(sourceId, targetId);
+    return;
+  }
+
+  reorderBatches(sourceId, targetId, intent);
+}
+
+function getBatchDropIntent(event) {
+  const rect = event.currentTarget.getBoundingClientRect();
+  const offsetY = event.clientY - rect.top;
+  const ratio = rect.height ? offsetY / rect.height : 0.5;
+  if (ratio < 0.3) return "before";
+  if (ratio > 0.7) return "after";
+  return "merge";
+}
+
+function updateBatchDropStyles(targetId, intent) {
+  clearBatchDropStyles();
+  const selector = `[data-batch-id="${escapeAttr(targetId)}"]`;
+  const card = elements.batchList.querySelector(selector);
+  if (!card) return;
+  if (intent === "merge") card.classList.add("drop-target");
+  if (intent === "before") card.classList.add("reorder-before");
+  if (intent === "after") card.classList.add("reorder-after");
+}
+
+function clearBatchDropStyles() {
+  $$(".batch-card.drop-target, .batch-card.reorder-before, .batch-card.reorder-after").forEach((card) => {
+    card.classList.remove("drop-target", "reorder-before", "reorder-after");
+  });
+}
+
+function reorderBatches(sourceId, targetId, intent) {
+  const sourceIndex = state.batches.findIndex((batch) => batch.id === sourceId);
+  const targetIndex = state.batches.findIndex((batch) => batch.id === targetId);
+  if (sourceIndex < 0 || targetIndex < 0) return;
+
+  const [source] = state.batches.splice(sourceIndex, 1);
+  let insertIndex = state.batches.findIndex((batch) => batch.id === targetId);
+  if (insertIndex < 0) {
+    state.batches.splice(sourceIndex, 0, source);
+    return;
+  }
+  if (intent === "after") {
+    insertIndex += 1;
+  }
+  state.batches.splice(insertIndex, 0, source);
+  persistBatchOrder();
+  saveState();
+  render();
+  showToast("批次顺序已更新");
 }
 
 function openMergeModal(sourceId, targetId) {
@@ -860,6 +919,7 @@ function confirmMergeBatches() {
   target.name = mergeBatchName(target.name, source.name);
   syncBatchDerivedFields(target);
   state.batches = state.batches.filter((batch) => batch.id !== source.id);
+  persistBatchOrder();
   selectedBatchId = target.id;
   closeMergeModal();
   saveState();
@@ -1348,7 +1408,30 @@ function normalizeState(value) {
   normalized.trash.batches.forEach((item) => {
     if (item?.data) syncBatchDerivedFields(item.data);
   });
+  normalized.batches = sortBatchesForDisplay(normalized.batches);
   return normalized;
+}
+
+function sortBatchesForDisplay(batches) {
+  const hasManualOrder = batches.some((batch) => Number.isFinite(batch.order));
+  const ordered = hasManualOrder
+    ? [...batches].sort((a, b) => {
+        const aOrder = Number.isFinite(a.order) ? a.order : Number.MAX_SAFE_INTEGER;
+        const bOrder = Number.isFinite(b.order) ? b.order : Number.MAX_SAFE_INTEGER;
+        return aOrder - bOrder || newestTime(b).localeCompare(newestTime(a));
+      })
+    : [...batches].sort((a, b) => newestTime(b).localeCompare(newestTime(a)));
+
+  ordered.forEach((batch, index) => {
+    batch.order = index;
+  });
+  return ordered;
+}
+
+function persistBatchOrder() {
+  state.batches.forEach((batch, index) => {
+    batch.order = index;
+  });
 }
 
 function restoreTrashedBatch(trashId) {
@@ -1359,6 +1442,7 @@ function restoreTrashedBatch(trashId) {
   restored.id = state.batches.some((batch) => batch.id === restored.id) ? makeId() : restored.id;
   state.batches.unshift(restored);
   state.trash.batches = state.trash.batches.filter((entry) => entry.id !== trashId);
+  persistBatchOrder();
   selectedBatchId = restored.id;
   saveState();
   render();
