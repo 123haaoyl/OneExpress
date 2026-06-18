@@ -551,6 +551,66 @@ textarea:focus {
   font-weight: 800;
 }
 
+.locator-panel {
+  margin-top: 12px;
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  background: var(--surface-soft);
+}
+
+.compact-heading {
+  margin-bottom: 0;
+}
+
+.compact-heading h3 {
+  margin: 0;
+}
+
+.compact-heading p {
+  margin: 4px 0 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.locator-summary {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.locator-results {
+  display: grid;
+  gap: 8px;
+}
+
+.locator-result {
+  width: 100%;
+  text-align: left;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 10px 12px;
+  display: grid;
+  gap: 4px;
+}
+
+.locator-result strong {
+  display: block;
+}
+
+.locator-result p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.locator-result.unmatched {
+  border-style: dashed;
+}
+
 .signed-update-actions {
   display: flex;
   gap: 10px;

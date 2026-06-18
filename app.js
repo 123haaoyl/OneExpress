@@ -96,6 +96,10 @@ const elements = {
   numberCount: $("#number-count"),
   detailNumbers: $("#detail-numbers"),
   searchInput: $("#search-input"),
+  locateNumbersInput: $("#locate-numbers-input"),
+  locateSummary: $("#locate-summary"),
+  locateResults: $("#locate-results"),
+  locateBatchesBtn: $("#locate-batches-btn"),
   templateList: $("#template-list"),
   importArea: $("#import-area"),
   jsonArea: $("#json-area"),
@@ -164,6 +168,8 @@ function bindEvents() {
   $("#save-numbers-btn").addEventListener("click", saveDetailNumbers);
   $("#save-batch-name-btn").addEventListener("click", saveSelectedBatchName);
   $("#export-selected-batch-btn").addEventListener("click", downloadSelectedBatchCsv);
+  elements.locateBatchesBtn.addEventListener("click", locateBatchesByNumbers);
+  elements.locateNumbersInput.addEventListener("input", updateLocateSummaryPreview);
   elements.filterSignedUpdateBtn.addEventListener("click", updateSignedUpdatePreview);
   elements.markSignedUpdateBtn.addEventListener("click", markSignedUpdateNumbers);
   elements.copyNewSignedBtn.addEventListener("click", copyNewSignedNumbers);
@@ -237,6 +243,7 @@ function render() {
   renderStats();
   renderBatchList();
   renderDetail();
+  updateLocateSummaryPreview();
   renderTemplates();
   renderSafety();
 }
@@ -338,6 +345,80 @@ function renderDetail() {
   renderTimeline(batch);
   renderPushOutput(batch);
   renderSignedUpdate(batch);
+}
+
+function updateLocateSummaryPreview() {
+  if (!elements.locateSummary || !elements.locateResults) return;
+  const numbers = parseLines(elements.locateNumbersInput.value || "");
+  elements.locateSummary.textContent = numbers.length ? `已输入 ${numbers.length} 条单号，点击“定位批次”开始查找` : "待定位";
+  if (!numbers.length) {
+    elements.locateResults.innerHTML = "";
+  }
+}
+
+function locateBatchesByNumbers() {
+  const numbers = uniqueValues(parseLines(elements.locateNumbersInput.value));
+  if (!numbers.length) {
+    showToast("请先输入要定位的单号");
+    elements.locateNumbersInput.focus();
+    return;
+  }
+
+  const batchMatches = state.batches
+    .map((batch) => {
+      const matchedNumbers = numbers.filter((number) => batch.numbers.includes(number));
+      return matchedNumbers.length ? { batch, matchedNumbers } : null;
+    })
+    .filter(Boolean);
+
+  const matchedSet = new Set(batchMatches.flatMap((item) => item.matchedNumbers));
+  const unmatchedNumbers = numbers.filter((number) => !matchedSet.has(number));
+
+  renderLocateResults(batchMatches, unmatchedNumbers, numbers.length);
+
+  if (batchMatches.length === 1) {
+    selectedBatchId = batchMatches[0].batch.id;
+    render();
+  }
+}
+
+function renderLocateResults(batchMatches, unmatchedNumbers, totalCount) {
+  const matchedCount = batchMatches.reduce((sum, item) => sum + item.matchedNumbers.length, 0);
+  elements.locateSummary.textContent = `共输入 ${totalCount} 条，匹配到 ${matchedCount} 条，涉及 ${batchMatches.length} 个批次，未匹配 ${unmatchedNumbers.length} 条`;
+
+  const matchedHtml = batchMatches
+    .map(({ batch, matchedNumbers }) => {
+      const stage = getStage(batch.stageKey);
+      return `
+        <button class="locator-result" type="button" data-locate-batch-id="${escapeAttr(batch.id)}">
+          <strong>${escapeHtml(batch.name)}</strong>
+          <p>${escapeHtml(stage?.name ?? "未设置")} · 命中 ${matchedNumbers.length} 条</p>
+          <p>${escapeHtml(matchedNumbers.slice(0, 8).join("、"))}${matchedNumbers.length > 8 ? " ..." : ""}</p>
+        </button>
+      `;
+    })
+    .join("");
+
+  const unmatchedHtml = unmatchedNumbers.length
+    ? `
+        <div class="locator-result unmatched">
+          <strong>未匹配到批次</strong>
+          <p>${escapeHtml(unmatchedNumbers.join("、"))}</p>
+        </div>
+      `
+    : "";
+
+  elements.locateResults.innerHTML =
+    matchedHtml || unmatchedHtml
+      ? `${matchedHtml}${unmatchedHtml}`
+      : `<div class="empty-state"><p>没有找到对应批次</p></div>`;
+
+  elements.locateResults.querySelectorAll("[data-locate-batch-id]").forEach((button) => {
+    button.addEventListener("click", () => {
+      selectedBatchId = button.dataset.locateBatchId;
+      render();
+    });
+  });
 }
 
 function renderTimeline(batch) {

@@ -99,6 +99,18 @@
                 </div>
                 <button class="secondary-button" id="split-batch-btn" type="button">拆分当前批次</button>
               </div>
+              <section class="locator-panel">
+                <div class="section-heading compact-heading">
+                  <div>
+                    <h3>单号定位批次</h3>
+                    <p>支持多行粘贴，帮你快速定位这些单号分别属于哪个批次</p>
+                  </div>
+                  <button class="secondary-button" id="locate-batches-btn" type="button">定位批次</button>
+                </div>
+                <textarea id="locate-numbers-input" rows="4" placeholder="一行一个单号；可一次粘贴多条"></textarea>
+                <div class="locator-summary" id="locate-summary">待定位</div>
+                <div id="locate-results" class="locator-results"></div>
+              </section>
               <div class="merge-hint">拖到上半区或下半区调整顺序；拖到中间高亮区可合并。拆出去的子批状态一致后，也可以拖回原批次合并。</div>
               <div id="batch-list" class="batch-list"></div>
             </section>
