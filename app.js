@@ -669,24 +669,24 @@ function updateSignedUpdatePreview() {
   if (!batch) {
     elements.signedUpdateSummary.textContent = "请选择一个批次";
     elements.signedUpdateOutput.value = "";
-    return [];
+    return { input: [], ready: [], duplicate: [], missing: [] };
   }
 
   const result = getSignedUpdateCandidates(batch, parseLines(elements.signedUpdateInput.value));
   elements.signedUpdateSummary.textContent = result.input.length
-    ? `输入 ${result.input.length} 单，未标记 ${result.ready.length}，已标记 ${result.duplicate.length}`
+    ? `输入 ${result.input.length} 单，可标记 ${result.ready.length}，已标记 ${result.duplicate.length}，非本批次 ${result.missing.length}`
     : "待筛选";
   elements.signedUpdateOutput.value = result.ready.join("\n");
-  return result.ready;
+  return result;
 }
 
 function markSignedUpdateNumbers() {
   const batch = getSelectedBatch();
   if (!batch) return;
 
-  const ready = updateSignedUpdatePreview();
+  const { ready, missing } = updateSignedUpdatePreview();
   if (!ready.length) {
-    showToast("没有新的签收单号可标记");
+    showToast(missing.length ? "输入单号不在当前批次，未执行标记" : "没有新的签收单号可标记");
     return;
   }
 
@@ -700,7 +700,7 @@ function markSignedUpdateNumbers() {
 }
 
 function copyNewSignedNumbers() {
-  const ready = updateSignedUpdatePreview();
+  const { ready } = updateSignedUpdatePreview();
   const text = ready.join("\n");
   if (!text.trim()) {
     showToast("没有可复制的未标记单号");
@@ -1594,14 +1594,18 @@ function syncBatchDerivedFields(batch) {
 function getSignedUpdateCandidates(batch, numbers) {
   const requested = uniqueValues(numbers);
   const signedNumbers = new Set(uniqueValues(batch?.signedNumbers || []));
+  const batchNumbers = new Set(uniqueValues(batch?.numbers || []));
   const result = {
     input: requested,
     ready: [],
     duplicate: [],
+    missing: [],
   };
 
   requested.forEach((number) => {
-    if (signedNumbers.has(number)) {
+    if (!batchNumbers.has(number) && !signedNumbers.has(number)) {
+      result.missing.push(number);
+    } else if (signedNumbers.has(number)) {
       result.duplicate.push(number);
     } else {
       result.ready.push(number);
@@ -1620,7 +1624,7 @@ function sortBatchEvents(batch) {
 }
 
 function uniqueValues(values) {
-  return Array.from(new Set(values.map((value) => String(value || "").trim()).filter(Boolean)));
+  return Array.from(new Set(values.map(normalizeTrackingNumber).filter(Boolean)));
 }
 
 function uniqueEvents(events) {
@@ -1652,10 +1656,17 @@ function cssEscape(value) {
   return String(value).replaceAll("\\", "\\\\").replaceAll('"', '\\"');
 }
 
+function normalizeTrackingNumber(value) {
+  return String(value || "")
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, "");
+}
+
 function parseLines(text) {
   return text
     .split(/[\r\n,，;；\t]+/)
-    .map((line) => line.trim().replace(/\s+/g, " "))
+    .map(normalizeTrackingNumber)
     .filter(Boolean);
 }
 
