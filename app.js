@@ -691,6 +691,9 @@ function markSignedUpdateNumbers() {
   }
 
   batch.signedNumbers = uniqueValues([...(batch.signedNumbers || []), ...ready]);
+  const signedSet = new Set(ready);
+  batch.numbers = batch.numbers.filter((number) => !signedSet.has(number));
+  batch.count = batch.numbers.length;
   saveState();
   render();
   showToast(`已标记 ${ready.length} 单签收`);
