@@ -1577,8 +1577,12 @@ function latestEvent(batch) {
 function syncBatchDerivedFields(batch) {
   if (!batch) return batch;
   batch.numbers = Array.isArray(batch.numbers) ? batch.numbers.map((value) => String(value || "").trim()).filter(Boolean) : [];
-  batch.count = getBatchTicketCount(batch);
   batch.signedNumbers = uniqueValues(batch.signedNumbers || []);
+  if (batch.signedNumbers.length && batch.numbers.length) {
+    const signedSet = new Set(batch.signedNumbers);
+    batch.numbers = batch.numbers.filter((number) => !signedSet.has(number));
+  }
+  batch.count = getBatchTicketCount(batch);
   batch.events = Array.isArray(batch.events) ? batch.events : [];
   const newestEvent = latestEvent(batch);
   if (newestEvent) {
