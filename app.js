@@ -1,6 +1,10 @@
 const STORAGE_KEY = "batch-tracking-tool-v1";
+const STORAGE_HISTORY_KEY = "batch-tracking-tool-history-v1";
 const THEME_KEY = "batch-tracking-theme-v1";
 const EMS_PLACEHOLDER = "#ems_number#";
+const CLOUD_SNAPSHOT_PREFIX = "snapshot:";
+const MAX_LOCAL_HISTORY = 25;
+const MAX_CLOUD_SNAPSHOT_FETCH = 20;
 const CLOUD_SQL = `create table if not exists public.tracking_tool_state (
   id text primary key,
   payload jsonb not null,
@@ -136,6 +140,7 @@ function loadOptionalCloudConfig() {
 }
 
 function boot() {
+  pushLocalHistorySnapshot(state);
   initTheme();
   fillStageSelects();
   updateBatchCountFromNumbers();
@@ -229,6 +234,7 @@ function saveState() {
   lastLocalChangeAt = Date.now();
   state.batches.forEach(syncBatchDerivedFields);
   persistBatchOrder();
+  pushLocalHistorySnapshot(state);
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   queueCloudSync();
 }
@@ -1240,6 +1246,99 @@ function loadCloudConfig() {
   };
 }
 
+function summarizeState(value) {
+  const normalized = normalizeState(value || {});
+  const activeBatches = normalized.batches || [];
+  const trashBatches = normalized.trash?.batches || [];
+  const activeNumbers = activeBatches.reduce((sum, batch) => sum + getBatchTicketCount(batch), 0);
+  const trashNumbers = trashBatches.reduce((sum, item) => sum + getBatchTicketCount(item.data), 0);
+  const signedNumbers = activeBatches.reduce((sum, batch) => sum + uniqueValues(batch.signedNumbers || []).length, 0);
+  const events = activeBatches.reduce((sum, batch) => sum + (batch.events?.length || 0), 0);
+
+  return {
+    batches: activeBatches.length,
+    trashBatches: trashBatches.length,
+    activeNumbers,
+    trashNumbers,
+    signedNumbers,
+    events,
+    totalNumbers: activeNumbers + trashNumbers,
+    score: activeNumbers + trashNumbers + signedNumbers * 5 + activeBatches.length * 20 + trashBatches.length * 10 + events * 2,
+  };
+}
+
+function isStateSignificantlySmaller(candidate, baseline) {
+  const next = summarizeState(candidate);
+  const prev = summarizeState(baseline);
+  if (!prev.score) return false;
+
+  const batchDrop = prev.batches - next.batches;
+  const numberDrop = prev.totalNumbers - next.totalNumbers;
+  const signedDrop = prev.signedNumbers - next.signedNumbers;
+  const eventDrop = prev.events - next.events;
+
+  return (
+    next.score < prev.score * 0.65 &&
+    (batchDrop >= 2 || numberDrop >= 200 || signedDrop >= 20 || eventDrop >= 10)
+  );
+}
+
+function makeSnapshotRecordId(timestamp = new Date().toISOString()) {
+  return `${CLOUD_SNAPSHOT_PREFIX}${timestamp}:${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function pushLocalHistorySnapshot(value) {
+  try {
+    const history = loadLocalHistory();
+    history.push({
+      savedAt: new Date().toISOString(),
+      summary: summarizeState(value),
+      state: structuredClone(value),
+    });
+    localStorage.setItem(STORAGE_HISTORY_KEY, JSON.stringify(history.slice(-MAX_LOCAL_HISTORY)));
+  } catch {
+    // Ignore history write failures to avoid blocking the main save path.
+  }
+}
+
+function loadLocalHistory() {
+  try {
+    const raw = localStorage.getItem(STORAGE_HISTORY_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+async function fetchRecentCloudSnapshots(limit = MAX_CLOUD_SNAPSHOT_FETCH) {
+  const url = `${cloudConfig.url}/rest/v1/${encodeURIComponent(cloudConfig.table)}?id=like.${encodeURIComponent(`${CLOUD_SNAPSHOT_PREFIX}%`)}&select=id,payload,updated_at&order=updated_at.desc&limit=${Math.max(1, limit)}`;
+  const response = await fetch(url, {
+    method: "GET",
+    headers: cloudHeaders(),
+  });
+
+  if (!response.ok) {
+    throw new Error(await response.text());
+  }
+
+  const rows = await response.json();
+  return Array.isArray(rows) ? rows : [];
+}
+
+function pickBestRecoveryCandidate(items) {
+  const candidates = items
+    .filter(Boolean)
+    .map((item) => ({
+      ...item,
+      payload: normalizeState(item.payload || item.state || {}),
+    }))
+    .filter((item) => hasMeaningfulSavedData(item.payload));
+
+  candidates.sort((a, b) => summarizeState(b.payload).score - summarizeState(a.payload).score);
+  return candidates[0] || null;
+}
+
 function startCloudSync() {
   if (!cloudConfig.enabled) {
     updateCloudStatus("本地保存", "");
@@ -1286,14 +1385,22 @@ async function syncToCloudNow(silent = false) {
   needsCloudSyncAfterFlight = false;
   updateCloudStatus("正在上传", "warn");
   try {
+    const snapshotId = makeSnapshotRecordId(updatedAt);
     const response = await fetch(`${cloudConfig.url}/rest/v1/${encodeURIComponent(cloudConfig.table)}?on_conflict=id`, {
       method: "POST",
       headers: cloudHeaders({ prefer: "resolution=merge-duplicates,return=minimal" }),
-      body: JSON.stringify({
-        id: cloudConfig.recordId,
-        payload,
-        updated_at: updatedAt,
-      }),
+      body: JSON.stringify([
+        {
+          id: cloudConfig.recordId,
+          payload,
+          updated_at: updatedAt,
+        },
+        {
+          id: snapshotId,
+          payload,
+          updated_at: updatedAt,
+        },
+      ]),
     });
 
     if (!response.ok) {
@@ -1365,6 +1472,34 @@ async function loadFromCloud(options = {}) {
 
     const remoteState = normalizeState(rows[0].payload);
     const remoteVersion = rows[0].updated_at || "";
+    if (!confirmOverwrite && isStateSignificantlySmaller(remoteState, state)) {
+      const localCandidate = pickBestRecoveryCandidate(loadLocalHistory());
+      let cloudCandidate = null;
+
+      try {
+        cloudCandidate = pickBestRecoveryCandidate(await fetchRecentCloudSnapshots());
+      } catch {
+        cloudCandidate = null;
+      }
+
+      const bestCandidate = pickBestRecoveryCandidate([localCandidate, cloudCandidate]);
+      if (bestCandidate && !isStateSignificantlySmaller(bestCandidate.payload, remoteState)) {
+        state = normalizeState(bestCandidate.payload);
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+        keepSelectedBatchIfPossible();
+        deferredCloudPull = false;
+        render();
+        updateCloudStatus("检测到云端数据变少，已保留较完整版本", "warn");
+        queueCloudSync();
+        showToast("检测到疑似旧数据覆盖，已自动保留更完整的历史版本");
+        return;
+      }
+
+      updateCloudStatus("检测到云端数据变少，已暂停覆盖", "warn");
+      deferredCloudPull = true;
+      showToast("检测到云端数据明显变少，已阻止自动覆盖当前数据");
+      return;
+    }
     if (!confirmOverwrite && !hasMeaningfulSavedData(remoteState) && hasMeaningfulSavedData(state)) {
       updateCloudStatus("云端为空，保留本地", "warn");
       deferredCloudPull = false;
