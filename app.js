@@ -3,6 +3,9 @@ const STORAGE_HISTORY_KEY = "batch-tracking-tool-history-v1";
 const THEME_KEY = "batch-tracking-theme-v1";
 const EMS_PLACEHOLDER = "#ems_number#";
 const CLOUD_SNAPSHOT_PREFIX = "snapshot:";
+const CLOUD_META_STAGES_ID = "meta:stages";
+const CLOUD_BATCH_PREFIX = "batch:";
+const CLOUD_TRASH_PREFIX = "trash:";
 const MAX_LOCAL_HISTORY = 25;
 const MAX_CLOUD_SNAPSHOT_FETCH = 20;
 const CLOUD_SQL = `create table if not exists public.tracking_tool_state (
@@ -64,6 +67,7 @@ let lastLocalChangeAt = 0;
 let editingEventId = null;
 let localSaveTimer = null;
 let deferredCloudPull = false;
+let lastCommittedState = structuredClone(state);
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
@@ -1246,6 +1250,151 @@ function loadCloudConfig() {
   };
 }
 
+function cloneStateForCommit(value) {
+  return structuredClone(normalizeState(value || {}));
+}
+
+function batchCloudId(batchId) {
+  return `${CLOUD_BATCH_PREFIX}${batchId}`;
+}
+
+function trashCloudId(trashId) {
+  return `${CLOUD_TRASH_PREFIX}${trashId}`;
+}
+
+function stableJson(value) {
+  return JSON.stringify(value ?? null);
+}
+
+function buildCloudRowsFromState(value) {
+  const normalized = cloneStateForCommit(value);
+  const rows = new Map();
+
+  rows.set(CLOUD_META_STAGES_ID, normalized.stages.map((stage) => structuredClone(stage)));
+  normalized.batches.forEach((batch) => {
+    rows.set(batchCloudId(batch.id), structuredClone(batch));
+  });
+  normalized.trash.batches.forEach((item) => {
+    rows.set(trashCloudId(item.id), structuredClone(item));
+  });
+
+  return rows;
+}
+
+function computeStateDiff(previousValue, nextValue) {
+  const previousRows = buildCloudRowsFromState(previousValue);
+  const nextRows = buildCloudRowsFromState(nextValue);
+  const upserts = [];
+  const deletes = [];
+
+  nextRows.forEach((payload, id) => {
+    if (stableJson(previousRows.get(id)) !== stableJson(payload)) {
+      upserts.push({ id, payload });
+    }
+  });
+
+  previousRows.forEach((_, id) => {
+    if (!nextRows.has(id)) {
+      deletes.push(id);
+    }
+  });
+
+  return { upserts, deletes };
+}
+
+function buildStateFromCollaborativeRows(rows) {
+  const stagesRow = rows.find((row) => row.id === CLOUD_META_STAGES_ID);
+  const collaborativeState = {
+    stages: Array.isArray(stagesRow?.payload) ? stagesRow.payload : structuredClone(defaultStages),
+    batches: rows
+      .filter((row) => row.id.startsWith(CLOUD_BATCH_PREFIX))
+      .map((row) => structuredClone(row.payload)),
+    trash: {
+      batches: rows
+        .filter((row) => row.id.startsWith(CLOUD_TRASH_PREFIX))
+        .map((row) => structuredClone(row.payload)),
+    },
+  };
+
+  return normalizeState(collaborativeState);
+}
+
+async function fetchCollaborativeRows() {
+  const url = `${cloudConfig.url}/rest/v1/${encodeURIComponent(cloudConfig.table)}?select=id,payload,updated_at&limit=1000`;
+  const response = await fetch(url, {
+    method: "GET",
+    headers: cloudHeaders(),
+  });
+
+  if (!response.ok) {
+    throw new Error(await response.text());
+  }
+
+  const rows = await response.json();
+  return (Array.isArray(rows) ? rows : []).filter((row) => {
+    return row.id === CLOUD_META_STAGES_ID || row.id.startsWith(CLOUD_BATCH_PREFIX) || row.id.startsWith(CLOUD_TRASH_PREFIX);
+  });
+}
+
+async function migrateLegacyRowToCollaborative(legacyPayload) {
+  const normalized = normalizeState(legacyPayload || {});
+  const rows = Array.from(buildCloudRowsFromState(normalized).entries()).map(([id, payload]) => ({
+    id,
+    payload,
+    updated_at: new Date().toISOString(),
+  }));
+
+  if (!rows.length) return normalized;
+
+  const response = await fetch(`${cloudConfig.url}/rest/v1/${encodeURIComponent(cloudConfig.table)}?on_conflict=id`, {
+    method: "POST",
+    headers: cloudHeaders({ prefer: "resolution=merge-duplicates,return=minimal" }),
+    body: JSON.stringify(rows),
+  });
+
+  if (!response.ok) {
+    throw new Error(await response.text());
+  }
+
+  return normalized;
+}
+
+async function deleteCloudRows(ids) {
+  if (!ids.length) return;
+  const encodedIds = ids.map((id) => `"${String(id).replaceAll('"', '\\"')}"`).join(",");
+  const url = `${cloudConfig.url}/rest/v1/${encodeURIComponent(cloudConfig.table)}?id=in.(${encodeURIComponent(encodedIds)})`;
+  const response = await fetch(url, {
+    method: "DELETE",
+    headers: cloudHeaders({ prefer: "return=minimal" }),
+  });
+
+  if (!response.ok) {
+    throw new Error(await response.text());
+  }
+}
+
+async function syncCollaborativeDiff(diff, updatedAt) {
+  if (diff.upserts.length) {
+    const response = await fetch(`${cloudConfig.url}/rest/v1/${encodeURIComponent(cloudConfig.table)}?on_conflict=id`, {
+      method: "POST",
+      headers: cloudHeaders({ prefer: "resolution=merge-duplicates,return=minimal" }),
+      body: JSON.stringify(
+        diff.upserts.map((item) => ({
+          id: item.id,
+          payload: item.payload,
+          updated_at: updatedAt,
+        }))
+      ),
+    });
+
+    if (!response.ok) {
+      throw new Error(await response.text());
+    }
+  }
+
+  await deleteCloudRows(diff.deletes);
+}
+
 function summarizeState(value) {
   const normalized = normalizeState(value || {});
   const activeBatches = normalized.batches || [];
@@ -1378,37 +1527,24 @@ async function syncToCloudNow(silent = false) {
     return;
   }
 
+  const diff = computeStateDiff(lastCommittedState, state);
+  if (!diff.upserts.length && !diff.deletes.length) {
+    lastSyncedRevision = Math.max(lastSyncedRevision, localRevision);
+    retryDeferredCloudPull();
+    return;
+  }
+
   const revisionToSync = localRevision;
-  const payload = structuredClone(state);
   const updatedAt = new Date().toISOString();
   cloudSaveInFlight = true;
   needsCloudSyncAfterFlight = false;
   updateCloudStatus("正在上传", "warn");
   try {
-    const snapshotId = makeSnapshotRecordId(updatedAt);
-    const response = await fetch(`${cloudConfig.url}/rest/v1/${encodeURIComponent(cloudConfig.table)}?on_conflict=id`, {
-      method: "POST",
-      headers: cloudHeaders({ prefer: "resolution=merge-duplicates,return=minimal" }),
-      body: JSON.stringify([
-        {
-          id: cloudConfig.recordId,
-          payload,
-          updated_at: updatedAt,
-        },
-        {
-          id: snapshotId,
-          payload,
-          updated_at: updatedAt,
-        },
-      ]),
-    });
-
-    if (!response.ok) {
-      throw new Error(await response.text());
-    }
+    await syncCollaborativeDiff(diff, updatedAt);
 
     lastCloudVersion = updatedAt;
     lastSyncedRevision = Math.max(lastSyncedRevision, revisionToSync);
+    lastCommittedState = cloneStateForCommit(state);
     updateCloudStatus("云端已同步", "ok");
     if (!silent) showToast("当前数据已上传到云端");
   } catch (error) {
@@ -1522,6 +1658,162 @@ async function loadFromCloud(options = {}) {
     keepSelectedBatchIfPossible();
     lastCloudVersion = remoteVersion;
     lastSyncedRevision = localRevision;
+    deferredCloudPull = false;
+    isApplyingRemote = false;
+    render();
+    updateCloudStatus("已读取云端", "ok");
+    if (!silent) showToast("已从云端恢复数据");
+  } catch (error) {
+    isApplyingRemote = false;
+    updateCloudStatus("读取失败", "error");
+    showToast(`云端读取失败：${formatError(error)}`);
+  }
+}
+
+async function syncToCloudNow(silent = false) {
+  if (!ensureCloudConfig()) return;
+  if (cloudSaveInFlight) {
+    needsCloudSyncAfterFlight = true;
+    return;
+  }
+
+  const diff = computeStateDiff(lastCommittedState, state);
+  if (!diff.upserts.length && !diff.deletes.length) {
+    lastSyncedRevision = Math.max(lastSyncedRevision, localRevision);
+    retryDeferredCloudPull();
+    return;
+  }
+
+  const revisionToSync = localRevision;
+  const updatedAt = new Date().toISOString();
+  cloudSaveInFlight = true;
+  needsCloudSyncAfterFlight = false;
+  updateCloudStatus("正在上传", "warn");
+  try {
+    await syncCollaborativeDiff(diff, updatedAt);
+    lastCloudVersion = updatedAt;
+    lastSyncedRevision = Math.max(lastSyncedRevision, revisionToSync);
+    lastCommittedState = cloneStateForCommit(state);
+    updateCloudStatus("云端已同步", "ok");
+    if (!silent) showToast("当前数据已上传到云端");
+  } catch (error) {
+    updateCloudStatus("同步失败", "error");
+    showToast(`云同步失败：${formatError(error)}`);
+  } finally {
+    cloudSaveInFlight = false;
+    if (needsCloudSyncAfterFlight || localRevision > lastSyncedRevision) {
+      queueCloudSync();
+    } else {
+      retryDeferredCloudPull();
+    }
+  }
+}
+
+async function loadFromCloud(options = {}) {
+  if (!ensureCloudConfig()) return;
+  const { silent = false, confirmOverwrite = false, onlyIfNewer = false } = options;
+  if (confirmOverwrite && !confirm("从云端读取会覆盖当前浏览器本地数据，确定继续？")) return;
+  if (!confirmOverwrite && shouldDeferRemoteApply()) {
+    updateCloudStatus("本地修改待上传", "warn");
+    deferredCloudPull = true;
+    return;
+  }
+
+  updateCloudStatus("正在读取", "warn");
+  try {
+    let rows = await fetchCollaborativeRows();
+    let remoteState = rows.length ? buildStateFromCollaborativeRows(rows) : null;
+    let remoteVersion = rows.reduce((latest, row) => (row.updated_at > latest ? row.updated_at : latest), "");
+
+    if (!remoteState) {
+      const legacyUrl = `${cloudConfig.url}/rest/v1/${encodeURIComponent(cloudConfig.table)}?id=eq.${encodeURIComponent(cloudConfig.recordId)}&select=payload,updated_at`;
+      const legacyResponse = await fetch(legacyUrl, {
+        method: "GET",
+        headers: cloudHeaders(),
+      });
+
+      if (!legacyResponse.ok) {
+        throw new Error(await legacyResponse.text());
+      }
+
+      const legacyRows = await legacyResponse.json();
+      if (legacyRows.length && legacyRows[0].payload) {
+        remoteState = await migrateLegacyRowToCollaborative(legacyRows[0].payload);
+        remoteVersion = legacyRows[0].updated_at || new Date().toISOString();
+      }
+    }
+
+    if (!remoteState) {
+      if (!confirmOverwrite && hasMeaningfulSavedData(state)) {
+        updateCloudStatus("云端为空，保留本地", "warn");
+        deferredCloudPull = false;
+        queueCloudSync();
+        return;
+      }
+
+      isApplyingRemote = true;
+      state = normalizeState({});
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      selectedBatchId = null;
+      lastCommittedState = cloneStateForCommit(state);
+      isApplyingRemote = false;
+      render();
+      updateCloudStatus("云端为空", "ok");
+      return;
+    }
+
+    if (!confirmOverwrite && isStateSignificantlySmaller(remoteState, state)) {
+      const localCandidate = pickBestRecoveryCandidate(loadLocalHistory());
+      let cloudCandidate = null;
+
+      try {
+        cloudCandidate = pickBestRecoveryCandidate(await fetchRecentCloudSnapshots());
+      } catch {
+        cloudCandidate = null;
+      }
+
+      const bestCandidate = pickBestRecoveryCandidate([localCandidate, cloudCandidate]);
+      if (bestCandidate && !isStateSignificantlySmaller(bestCandidate.payload, remoteState)) {
+        state = normalizeState(bestCandidate.payload);
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+        keepSelectedBatchIfPossible();
+        deferredCloudPull = false;
+        render();
+        updateCloudStatus("检测到云端数据变少，已保留较完整版本", "warn");
+        queueCloudSync();
+        showToast("检测到疑似旧数据覆盖，已自动保留更完整的历史版本");
+        return;
+      }
+
+      updateCloudStatus("检测到云端数据变少，已暂停覆盖", "warn");
+      deferredCloudPull = true;
+      showToast("检测到云端数据明显变少，已阻止自动覆盖当前数据");
+      return;
+    }
+
+    if (!confirmOverwrite && !hasMeaningfulSavedData(remoteState) && hasMeaningfulSavedData(state)) {
+      updateCloudStatus("云端为空，保留本地", "warn");
+      deferredCloudPull = false;
+      queueCloudSync();
+      return;
+    }
+    if (!confirmOverwrite && shouldDeferRemoteApply()) {
+      updateCloudStatus("本地修改待上传", "warn");
+      deferredCloudPull = true;
+      return;
+    }
+    if (onlyIfNewer && remoteVersion && remoteVersion === lastCloudVersion) {
+      updateCloudStatus("云端已同步", "ok");
+      return;
+    }
+
+    isApplyingRemote = true;
+    state = remoteState;
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    keepSelectedBatchIfPossible();
+    lastCloudVersion = remoteVersion;
+    lastSyncedRevision = localRevision;
+    lastCommittedState = cloneStateForCommit(state);
     deferredCloudPull = false;
     isApplyingRemote = false;
     render();
