@@ -233,14 +233,29 @@ function loadState() {
   }
 }
 
-function saveState() {
-  localRevision += 1;
-  lastLocalChangeAt = Date.now();
-  state.batches.forEach(syncBatchDerivedFields);
-  persistBatchOrder();
+function persistStateLocally() {
   pushLocalHistorySnapshot(state);
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+}
+
+function markStateChanged() {
+  localRevision += 1;
+  lastLocalChangeAt = Date.now();
+}
+
+function saveState() {
+  markStateChanged();
+  state.batches.forEach(syncBatchDerivedFields);
+  persistBatchOrder();
+  persistStateLocally();
   queueCloudSync();
+}
+
+function saveTemplateState() {
+  markStateChanged();
+  persistBatchOrder();
+  persistStateLocally();
+  queueCloudSync(250);
 }
 
 function queueSaveState() {
@@ -1075,7 +1090,7 @@ function updateTemplate(stageKey, field, value) {
   if (!stage || !["name", "template", "type"].includes(field)) return;
 
   stage[field] = value.trim();
-  saveState();
+  saveTemplateState();
   render();
   showToast("模板已更新");
 }
@@ -1088,7 +1103,7 @@ function addTemplate() {
     type: "普通",
     template: "{destination}: 新轨迹内容",
   });
-  saveState();
+  saveTemplateState();
   render();
   showToast("已新增模板");
 }
@@ -1510,164 +1525,14 @@ function startCloudSync() {
   }, interval);
 }
 
-function queueCloudSync() {
+function queueCloudSync(delay = 900) {
   if (isApplyingRemote || !cloudConfig.enabled) return;
   if (cloudSaveInFlight) {
     needsCloudSyncAfterFlight = true;
     return;
   }
   clearTimeout(cloudSaveTimer);
-  cloudSaveTimer = setTimeout(() => syncToCloudNow(true), 900);
-}
-
-async function syncToCloudNowLegacyUnused(silent = false) {
-  if (!ensureCloudConfig()) return;
-  if (cloudSaveInFlight) {
-    needsCloudSyncAfterFlight = true;
-    return;
-  }
-
-  const diff = computeStateDiff(lastCommittedState, state);
-  if (!diff.upserts.length && !diff.deletes.length) {
-    lastSyncedRevision = Math.max(lastSyncedRevision, localRevision);
-    retryDeferredCloudPull();
-    return;
-  }
-
-  const revisionToSync = localRevision;
-  const updatedAt = new Date().toISOString();
-  cloudSaveInFlight = true;
-  needsCloudSyncAfterFlight = false;
-  updateCloudStatus("正在上传", "warn");
-  try {
-    await syncCollaborativeDiff(diff, updatedAt);
-
-    lastCloudVersion = updatedAt;
-    lastSyncedRevision = Math.max(lastSyncedRevision, revisionToSync);
-    lastCommittedState = cloneStateForCommit(state);
-    updateCloudStatus("云端已同步", "ok");
-    if (!silent) showToast("当前数据已上传到云端");
-  } catch (error) {
-    updateCloudStatus("同步失败", "error");
-    showToast(`云同步失败：${formatError(error)}`);
-  } finally {
-    cloudSaveInFlight = false;
-    if (needsCloudSyncAfterFlight || localRevision > lastSyncedRevision) {
-      queueCloudSync();
-    } else {
-      retryDeferredCloudPull();
-    }
-  }
-}
-
-async function loadFromCloudLegacyUnused(options = {}) {
-  if (!ensureCloudConfig()) return;
-  const { silent = false, confirmOverwrite = false, onlyIfNewer = false } = options;
-  if (confirmOverwrite && !confirm("从云端读取会覆盖当前浏览器本地数据，确定继续？")) return;
-  if (!confirmOverwrite && shouldDeferRemoteApply()) {
-    updateCloudStatus("本地修改待上传", "warn");
-    deferredCloudPull = true;
-    return;
-  }
-
-  updateCloudStatus("正在读取", "warn");
-  try {
-    const url = `${cloudConfig.url}/rest/v1/${encodeURIComponent(cloudConfig.table)}?id=eq.${encodeURIComponent(cloudConfig.recordId)}&select=payload,updated_at`;
-    const response = await fetch(url, {
-      method: "GET",
-      headers: cloudHeaders(),
-    });
-
-    if (!response.ok) {
-      throw new Error(await response.text());
-    }
-
-    const rows = await response.json();
-    if (!rows.length || !rows[0].payload) {
-      if (!confirmOverwrite && hasMeaningfulSavedData(state)) {
-        updateCloudStatus("云端为空，保留本地", "warn");
-        deferredCloudPull = false;
-        queueCloudSync();
-        return;
-      }
-      if (!confirmOverwrite && shouldDeferRemoteApply()) {
-        updateCloudStatus("本地修改待上传", "warn");
-        deferredCloudPull = true;
-        return;
-      }
-      isApplyingRemote = true;
-      state = normalizeState({});
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-      selectedBatchId = null;
-      isApplyingRemote = false;
-      render();
-      updateCloudStatus("云端为空", "ok");
-      queueCloudSync();
-      return;
-    }
-
-    const remoteState = normalizeState(rows[0].payload);
-    const remoteVersion = rows[0].updated_at || "";
-    if (!confirmOverwrite && isStateSignificantlySmaller(remoteState, state)) {
-      const localCandidate = pickBestRecoveryCandidate(loadLocalHistory());
-      let cloudCandidate = null;
-
-      try {
-        cloudCandidate = pickBestRecoveryCandidate(await fetchRecentCloudSnapshots());
-      } catch {
-        cloudCandidate = null;
-      }
-
-      const bestCandidate = pickBestRecoveryCandidate([localCandidate, cloudCandidate]);
-      if (bestCandidate && !isStateSignificantlySmaller(bestCandidate.payload, remoteState)) {
-        state = normalizeState(bestCandidate.payload);
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-        keepSelectedBatchIfPossible();
-        deferredCloudPull = false;
-        render();
-        updateCloudStatus("检测到云端数据变少，已保留较完整版本", "warn");
-        queueCloudSync();
-        showToast("检测到疑似旧数据覆盖，已自动保留更完整的历史版本");
-        return;
-      }
-
-      updateCloudStatus("检测到云端数据变少，已暂停覆盖", "warn");
-      deferredCloudPull = true;
-      showToast("检测到云端数据明显变少，已阻止自动覆盖当前数据");
-      return;
-    }
-    if (!confirmOverwrite && !hasMeaningfulSavedData(remoteState) && hasMeaningfulSavedData(state)) {
-      updateCloudStatus("云端为空，保留本地", "warn");
-      deferredCloudPull = false;
-      queueCloudSync();
-      return;
-    }
-    if (!confirmOverwrite && shouldDeferRemoteApply()) {
-      updateCloudStatus("本地修改待上传", "warn");
-      deferredCloudPull = true;
-      return;
-    }
-    if (onlyIfNewer && remoteVersion && remoteVersion === lastCloudVersion) {
-      updateCloudStatus("云端已同步", "ok");
-      return;
-    }
-
-    isApplyingRemote = true;
-    state = remoteState;
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-    keepSelectedBatchIfPossible();
-    lastCloudVersion = remoteVersion;
-    lastSyncedRevision = localRevision;
-    deferredCloudPull = false;
-    isApplyingRemote = false;
-    render();
-    updateCloudStatus("已读取云端", "ok");
-    if (!silent) showToast("已从云端恢复数据");
-  } catch (error) {
-    isApplyingRemote = false;
-    updateCloudStatus("读取失败", "error");
-    showToast(`云端读取失败：${formatError(error)}`);
-  }
+  cloudSaveTimer = setTimeout(() => syncToCloudNow(true), delay);
 }
 
 async function syncToCloudNow(silent = false) {
