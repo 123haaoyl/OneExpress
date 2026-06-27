@@ -1520,7 +1520,7 @@ function queueCloudSync() {
   cloudSaveTimer = setTimeout(() => syncToCloudNow(true), 900);
 }
 
-async function syncToCloudNow(silent = false) {
+async function syncToCloudNowLegacyUnused(silent = false) {
   if (!ensureCloudConfig()) return;
   if (cloudSaveInFlight) {
     needsCloudSyncAfterFlight = true;
@@ -1560,7 +1560,7 @@ async function syncToCloudNow(silent = false) {
   }
 }
 
-async function loadFromCloud(options = {}) {
+async function loadFromCloudLegacyUnused(options = {}) {
   if (!ensureCloudConfig()) return;
   const { silent = false, confirmOverwrite = false, onlyIfNewer = false } = options;
   if (confirmOverwrite && !confirm("从云端读取会覆盖当前浏览器本地数据，确定继续？")) return;
@@ -1722,8 +1722,23 @@ async function loadFromCloud(options = {}) {
   updateCloudStatus("正在读取", "warn");
   try {
     let rows = await fetchCollaborativeRows();
+    const hasCollaborativeRows = rows.length > 0;
+    const hasBatchRows = rows.some((row) => row.id.startsWith(CLOUD_BATCH_PREFIX));
+    const hasTrashRows = rows.some((row) => row.id.startsWith(CLOUD_TRASH_PREFIX));
     let remoteState = rows.length ? buildStateFromCollaborativeRows(rows) : null;
     let remoteVersion = rows.reduce((latest, row) => (row.updated_at > latest ? row.updated_at : latest), "");
+
+    if (!confirmOverwrite && onlyIfNewer && remoteVersion && remoteVersion === lastCloudVersion) {
+      updateCloudStatus("浜戠宸插悓姝?", "ok");
+      return;
+    }
+
+    if (!confirmOverwrite && hasCollaborativeRows && !hasBatchRows && !hasTrashRows && hasMeaningfulSavedData(state)) {
+      updateCloudStatus("浜戠鏁版嵁璇诲彇涓嶅畬鏁达紝宸叉殏缂撹鐩?", "warn");
+      deferredCloudPull = true;
+      queueCloudSync();
+      return;
+    }
 
     if (!remoteState) {
       const legacyUrl = `${cloudConfig.url}/rest/v1/${encodeURIComponent(cloudConfig.table)}?id=eq.${encodeURIComponent(cloudConfig.recordId)}&select=payload,updated_at`;
