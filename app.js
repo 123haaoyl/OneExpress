@@ -248,14 +248,14 @@ function saveState() {
   markStateChanged();
   state.batches.forEach(syncBatchDerivedFields);
   persistBatchOrder();
-  if (!persistStateLocally()) return;
+  persistStateLocally();
   queueCloudSync();
 }
 
 function saveTemplateState() {
   markStateChanged();
   persistBatchOrder();
-  if (!persistStateLocally()) return;
+  persistStateLocally();
   queueCloudSync(250);
 }
 
