@@ -68,6 +68,7 @@ let editingEventId = null;
 let localSaveTimer = null;
 let deferredCloudPull = false;
 let lastCommittedState = structuredClone(state);
+let hasShownStorageQuotaWarning = false;
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
@@ -235,7 +236,7 @@ function loadState() {
 
 function persistStateLocally() {
   pushLocalHistorySnapshot(state);
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  return writeStateToLocalStorage(state);
 }
 
 function markStateChanged() {
@@ -247,14 +248,14 @@ function saveState() {
   markStateChanged();
   state.batches.forEach(syncBatchDerivedFields);
   persistBatchOrder();
-  persistStateLocally();
+  if (!persistStateLocally()) return;
   queueCloudSync();
 }
 
 function saveTemplateState() {
   markStateChanged();
   persistBatchOrder();
-  persistStateLocally();
+  if (!persistStateLocally()) return;
   queueCloudSync(250);
 }
 
@@ -1465,6 +1466,56 @@ function pushLocalHistorySnapshot(value) {
   }
 }
 
+function clearLocalHistorySnapshots() {
+  try {
+    localStorage.removeItem(STORAGE_HISTORY_KEY);
+  } catch {
+    // Ignore cleanup failures and let the main write report the problem.
+  }
+}
+
+function isQuotaExceededError(error) {
+  if (!error) return false;
+  return (
+    error.name === "QuotaExceededError" ||
+    error.name === "NS_ERROR_DOM_QUOTA_REACHED" ||
+    error.code === 22 ||
+    error.code === 1014
+  );
+}
+
+function writeStateToLocalStorage(nextState) {
+  const serialized = JSON.stringify(nextState);
+
+  try {
+    localStorage.setItem(STORAGE_KEY, serialized);
+    hasShownStorageQuotaWarning = false;
+    return true;
+  } catch (error) {
+    if (isQuotaExceededError(error)) {
+      clearLocalHistorySnapshots();
+
+      try {
+        localStorage.setItem(STORAGE_KEY, serialized);
+        showToast("本地历史缓存已自动清理，当前修改已保存");
+        hasShownStorageQuotaWarning = false;
+        return true;
+      } catch (retryError) {
+        if (!hasShownStorageQuotaWarning) {
+          showToast("本地存储已满，当前修改暂未保存，请先导出或清理部分历史数据");
+          hasShownStorageQuotaWarning = true;
+        }
+        console.error("Failed to persist state after clearing local history.", retryError);
+        updateCloudStatus("本地存储已满", "error");
+        deferredCloudPull = true;
+        return false;
+      }
+    }
+
+    throw error;
+  }
+}
+
 function loadLocalHistory() {
   try {
     const raw = localStorage.getItem(STORAGE_HISTORY_KEY);
@@ -1633,7 +1684,7 @@ async function loadFromCloud(options = {}) {
 
       isApplyingRemote = true;
       state = normalizeState({});
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      writeStateToLocalStorage(state);
       selectedBatchId = null;
       lastCommittedState = cloneStateForCommit(state);
       isApplyingRemote = false;
@@ -1655,7 +1706,7 @@ async function loadFromCloud(options = {}) {
       const bestCandidate = pickBestRecoveryCandidate([localCandidate, cloudCandidate]);
       if (bestCandidate && !isStateSignificantlySmaller(bestCandidate.payload, remoteState)) {
         state = normalizeState(bestCandidate.payload);
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+        writeStateToLocalStorage(state);
         keepSelectedBatchIfPossible();
         deferredCloudPull = false;
         render();
@@ -1689,7 +1740,7 @@ async function loadFromCloud(options = {}) {
 
     isApplyingRemote = true;
     state = remoteState;
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    writeStateToLocalStorage(state);
     keepSelectedBatchIfPossible();
     lastCloudVersion = remoteVersion;
     lastSyncedRevision = localRevision;
