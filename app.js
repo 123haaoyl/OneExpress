@@ -1848,7 +1848,9 @@ function normalizeState(value) {
     stages,
     batches: Array.isArray(value?.batches) ? value.batches : [],
     trash: {
-      batches: Array.isArray(value?.trash?.batches) ? value.trash.batches : [],
+      batches: Array.isArray(value?.trash?.batches)
+        ? value.trash.batches.filter((item) => item?.data && !item.__deleted)
+        : [],
     },
   };
   normalized.batches.forEach(syncBatchDerivedFields);
