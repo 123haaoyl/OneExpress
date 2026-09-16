@@ -4,6 +4,7 @@ const THEME_KEY = "batch-tracking-theme-v1";
 const EMS_PLACEHOLDER = "#ems_number#";
 const CLOUD_SNAPSHOT_PREFIX = "snapshot:";
 const CLOUD_META_STAGES_ID = "meta:stages";
+const CLOUD_META_SETTINGS_ID = "meta:settings";
 const CLOUD_BATCH_PREFIX = "batch:";
 const CLOUD_TRASH_PREFIX = "trash:";
 const MAX_LOCAL_HISTORY = 25;
@@ -16,12 +17,13 @@ const CLOUD_SQL = `create table if not exists public.tracking_tool_state (
 
 alter table public.tracking_tool_state enable row level security;
 
-grant select, insert, update on public.tracking_tool_state to anon;
-grant select, insert, update on public.tracking_tool_state to authenticated;
+grant select, insert, update, delete on public.tracking_tool_state to anon;
+grant select, insert, update, delete on public.tracking_tool_state to authenticated;
 
 drop policy if exists "tracking_tool_state_read" on public.tracking_tool_state;
 drop policy if exists "tracking_tool_state_insert" on public.tracking_tool_state;
 drop policy if exists "tracking_tool_state_update" on public.tracking_tool_state;
+drop policy if exists "tracking_tool_state_delete" on public.tracking_tool_state;
 
 create policy "tracking_tool_state_read"
 on public.tracking_tool_state for select
@@ -34,7 +36,11 @@ with check (true);
 create policy "tracking_tool_state_update"
 on public.tracking_tool_state for update
 using (true)
-with check (true);`;
+with check (true);
+
+create policy "tracking_tool_state_delete"
+on public.tracking_tool_state for delete
+using (true);`;
 
 const defaultStages = [
   { key: "info", name: "信息收到", type: "普通", template: "CHINA: Shipment Information Received" },
@@ -51,7 +57,8 @@ const defaultStages = [
 ];
 
 let state = loadState();
-let selectedBatchId = state.batches[0]?.id ?? null;
+let activeBoard = "inventory";
+let selectedBatchId = state.batches.find((batch) => getBatchBoardType(batch) === activeBoard)?.id ?? null;
 let pendingMerge = null;
 let draggedBatchId = null;
 let currentDropIntent = null;
@@ -79,6 +86,7 @@ const elements = {
   batchName: $("#batch-name"),
   batchCount: $("#batch-count"),
   batchDestination: $("#batch-destination"),
+  batchBoardType: $("#batch-board-type"),
   batchStage: $("#batch-stage"),
   batchTime: $("#batch-time"),
   batchNumbers: $("#batch-numbers"),
@@ -97,6 +105,7 @@ const elements = {
   signedUpdateOutput: $("#signed-update-output"),
   signedUpdateCount: $("#signed-update-count"),
   signedUpdateHistory: $("#signed-update-history"),
+  signedUpdatePanel: $("#signed-update-panel"),
   filterSignedUpdateBtn: $("#filter-signed-update-btn"),
   markSignedUpdateBtn: $("#mark-signed-update-btn"),
   copyNewSignedBtn: $("#copy-new-signed-btn"),
@@ -109,6 +118,14 @@ const elements = {
   locateSummary: $("#locate-summary"),
   locateResults: $("#locate-results"),
   locateBatchesBtn: $("#locate-batches-btn"),
+  flightTransferPanel: $("#flight-transfer-panel"),
+  flightNumberInput: $("#flight-number-input"),
+  flightTransferInput: $("#flight-transfer-input"),
+  flightTransferSummary: $("#flight-transfer-summary"),
+  flightTransferOutput: $("#flight-transfer-output"),
+  filterFlightTransferBtn: $("#filter-flight-transfer-btn"),
+  markFlightBtn: $("#mark-flight-btn"),
+  copyFlightReadyBtn: $("#copy-flight-ready-btn"),
   templateList: $("#template-list"),
   importArea: $("#import-area"),
   jsonArea: $("#json-area"),
@@ -150,6 +167,7 @@ function boot() {
   fillStageSelects();
   updateBatchCountFromNumbers();
   elements.batchTime.value = toInputDateTime(new Date());
+  elements.flightNumberInput.value = state.settings.activeFlightNumber || "";
   bindEvents();
   render();
   startCloudSync();
@@ -184,6 +202,14 @@ function bindEvents() {
   elements.markSignedUpdateBtn.addEventListener("click", markSignedUpdateNumbers);
   elements.copyNewSignedBtn.addEventListener("click", copyNewSignedNumbers);
   elements.signedUpdateInput.addEventListener("input", updateSignedUpdatePreview);
+  elements.flightTransferInput.addEventListener("input", updateFlightTransferPreview);
+  elements.flightNumberInput.addEventListener("input", rememberFlightNumber);
+  elements.filterFlightTransferBtn.addEventListener("click", updateFlightTransferPreview);
+  elements.markFlightBtn.addEventListener("click", markFlightNumbers);
+  elements.copyFlightReadyBtn.addEventListener("click", copyFlightReadyNumbers);
+  $$(".board-tab").forEach((tab) => {
+    tab.addEventListener("click", () => switchBoard(tab.dataset.board));
+  });
   $("#delete-batch-btn").addEventListener("click", deleteSelectedBatch);
   $("#duplicate-batch-btn").addEventListener("click", duplicateSelectedBatch);
   $("#split-batch-btn").addEventListener("click", splitSelectedBatch);
@@ -267,6 +293,7 @@ function queueSaveState() {
 function render() {
   fillStageSelects();
   renderStats();
+  renderBoardControls();
   renderBatchList();
   renderDetail();
   updateLocateSummaryPreview();
@@ -288,16 +315,17 @@ function fillStageSelects() {
 }
 
 function renderStats() {
-  $("#stat-total").textContent = state.batches.length;
-  $("#stat-orders").textContent = state.batches.reduce((total, batch) => total + getBatchTicketCount(batch), 0).toLocaleString("zh-CN");
-  $("#stat-pending").textContent = state.batches
+  const visibleBatches = getVisibleBatches();
+  $("#stat-total").textContent = visibleBatches.length;
+  $("#stat-orders").textContent = visibleBatches.reduce((total, batch) => total + getBatchTicketCount(batch), 0).toLocaleString("zh-CN");
+  $("#stat-pending").textContent = visibleBatches
     .reduce((total, batch) => total + batch.events.filter((event) => !event.pushed).length, 0)
     .toLocaleString("zh-CN");
 }
 
 function renderBatchList() {
   const query = elements.searchInput.value.trim().toLowerCase();
-  const batches = state.batches.filter((batch) => {
+  const batches = getVisibleBatches().filter((batch) => {
     const text = [
       batch.name,
       batch.destination,
@@ -367,6 +395,7 @@ function renderDetail() {
   elements.eventContent.value = renderTemplate(stage?.template ?? "", batch);
   elements.numberCount.textContent = getBatchTicketCount(batch).toLocaleString("zh-CN");
   elements.detailNumbers.value = batch.numbers.join("\n");
+  elements.signedUpdatePanel.hidden = getBatchBoardType(batch) !== "flight";
 
   renderTimeline(batch);
   renderPushOutput(batch);
@@ -391,6 +420,7 @@ function locateBatchesByNumbers() {
   }
 
   const batchMatches = state.batches
+    .filter((batch) => getBatchBoardType(batch) === activeBoard)
     .map((batch) => {
       const matchedNumbers = numbers.filter((number) => batch.numbers.includes(number));
       return matchedNumbers.length ? { batch, matchedNumbers } : null;
@@ -623,6 +653,7 @@ function addBatch(event) {
   const batch = {
     id: makeId(),
     name: elements.batchName.value.trim(),
+    boardType: elements.batchBoardType.value === "flight" ? "flight" : "inventory",
     count: numbers.length,
     destination: cleanUpper(elements.batchDestination.value || "US"),
     origin: "CHINA",
@@ -645,13 +676,15 @@ function addBatch(event) {
 
   state.batches.unshift(batch);
   selectedBatchId = batch.id;
+  activeBoard = batch.boardType;
   saveState();
   elements.batchForm.reset();
   elements.batchCount.value = 0;
+  elements.batchBoardType.value = "inventory";
   elements.batchDestination.value = "US";
   elements.batchTime.value = toInputDateTime(new Date());
   render();
-  showToast("批次已保存");
+  showToast(`${batch.boardType === "inventory" ? "入库" : "航班"}批次已保存`);
 }
 
 function updateBatchCountFromNumbers() {
@@ -985,6 +1018,10 @@ function openMergeModal(sourceId, targetId) {
   const source = state.batches.find((batch) => batch.id === sourceId);
   const target = state.batches.find((batch) => batch.id === targetId);
   if (!source || !target) return;
+  if (getBatchBoardType(source) !== getBatchBoardType(target)) {
+    showToast("只能合并同一看板内的批次");
+    return;
+  }
 
   pendingMerge = { sourceId, targetId };
   elements.mergeSourceName.textContent = source.name;
@@ -1016,8 +1053,17 @@ function confirmMergeBatches() {
     showToast("批次不存在，无法合并");
     return;
   }
+  if (getBatchBoardType(source) !== getBatchBoardType(target)) {
+    closeMergeModal();
+    showToast("只能合并同一看板内的批次");
+    return;
+  }
 
   target.numbers = uniqueValues([...target.numbers, ...source.numbers]);
+  target.boardType = getBatchBoardType(target);
+  if (target.boardType === "flight") {
+    target.flightNumber = target.flightNumber || source.flightNumber || target.name;
+  }
   target.events = uniqueEvents([...target.events, ...source.events]);
   sortBatchEvents(target);
 
@@ -1155,6 +1201,7 @@ function importCsv() {
       return {
         id: makeId(),
         name: name || `导入批次 ${new Date().toLocaleString("zh-CN")}`,
+        boardType: activeBoard,
         count: numbers.length || count,
         destination,
         origin: "CHINA",
@@ -1287,6 +1334,7 @@ function buildCloudRowsFromState(value) {
   const rows = new Map();
 
   rows.set(CLOUD_META_STAGES_ID, normalized.stages.map((stage) => structuredClone(stage)));
+  rows.set(CLOUD_META_SETTINGS_ID, structuredClone(normalized.settings));
   normalized.batches.forEach((batch) => {
     rows.set(batchCloudId(batch.id), structuredClone(batch));
   });
@@ -1320,13 +1368,16 @@ function computeStateDiff(previousValue, nextValue) {
 
 function buildStateFromCollaborativeRows(rows) {
   const stagesRow = rows.find((row) => row.id === CLOUD_META_STAGES_ID);
+  const settingsRow = rows.find((row) => row.id === CLOUD_META_SETTINGS_ID);
+  const liveRows = rows.filter((row) => !row?.payload?.__deleted);
   const collaborativeState = {
     stages: Array.isArray(stagesRow?.payload) ? stagesRow.payload : structuredClone(defaultStages),
-    batches: rows
+    settings: settingsRow?.payload && typeof settingsRow.payload === "object" ? settingsRow.payload : {},
+    batches: liveRows
       .filter((row) => row.id.startsWith(CLOUD_BATCH_PREFIX))
       .map((row) => structuredClone(row.payload)),
     trash: {
-      batches: rows
+      batches: liveRows
         .filter((row) => row.id.startsWith(CLOUD_TRASH_PREFIX))
         .map((row) => structuredClone(row.payload)),
     },
@@ -1348,7 +1399,7 @@ async function fetchCollaborativeRows() {
 
   const rows = await response.json();
   return (Array.isArray(rows) ? rows : []).filter((row) => {
-    return row.id === CLOUD_META_STAGES_ID || row.id.startsWith(CLOUD_BATCH_PREFIX) || row.id.startsWith(CLOUD_TRASH_PREFIX);
+    return row.id === CLOUD_META_STAGES_ID || row.id === CLOUD_META_SETTINGS_ID || row.id.startsWith(CLOUD_BATCH_PREFIX) || row.id.startsWith(CLOUD_TRASH_PREFIX);
   });
 }
 
@@ -1377,30 +1428,179 @@ async function migrateLegacyRowToCollaborative(legacyPayload) {
 
 async function deleteCloudRows(ids) {
   if (!ids.length) return;
-  const encodedIds = ids.map((id) => `"${String(id).replaceAll('"', '\\"')}"`).join(",");
-  const url = `${cloudConfig.url}/rest/v1/${encodeURIComponent(cloudConfig.table)}?id=in.(${encodeURIComponent(encodedIds)})`;
-  const response = await fetch(url, {
-    method: "DELETE",
-    headers: cloudHeaders({ prefer: "return=minimal" }),
-  });
+  for (const id of ids) {
+    const url = `${cloudConfig.url}/rest/v1/${encodeURIComponent(cloudConfig.table)}?id=eq.${encodeURIComponent(id)}`;
+    const response = await fetch(url, {
+      method: "DELETE",
+      headers: cloudHeaders({ prefer: "return=minimal" }),
+    });
 
-  if (!response.ok) {
-    throw new Error(await response.text());
+    if (!response.ok) {
+      throw new Error(await response.text());
+    }
+  }
+}
+
+function getFlightTransferCandidates() {
+  const requested = uniqueValues(parseLines(elements.flightTransferInput.value));
+  const flightNumber = cleanUpper(elements.flightNumberInput.value);
+  const inventoryNumbers = new Set(getVisibleBatches().flatMap((batch) => batch.numbers));
+  const flightNumbers = new Set(
+    state.batches
+      .filter((batch) => getBatchBoardType(batch) === "flight")
+      .flatMap((batch) => batch.numbers)
+  );
+  const result = { input: requested, ready: [], duplicate: [], missing: [], flightNumber };
+
+  requested.forEach((number) => {
+    if (flightNumbers.has(number)) {
+      result.duplicate.push(number);
+    } else if (inventoryNumbers.has(number)) {
+      result.ready.push(number);
+    } else {
+      result.missing.push(number);
+    }
+  });
+  return result;
+}
+
+function rememberFlightNumber() {
+  state.settings.activeFlightNumber = cleanUpper(elements.flightNumberInput.value);
+  queueSaveState();
+  updateFlightTransferPreview();
+}
+
+function updateFlightTransferPreview() {
+  if (!elements.flightTransferInput || activeBoard !== "inventory") return { input: [], ready: [], duplicate: [], missing: [] };
+  const result = getFlightTransferCandidates();
+  const flightHint = result.flightNumber ? `航班号 ${result.flightNumber}：` : "请先预设航班号；";
+  elements.flightTransferSummary.textContent = result.input.length
+    ? `${flightHint}输入 ${result.input.length} 单，可上航班 ${result.ready.length}，已在航班批次 ${result.duplicate.length}，未在入库批次 ${result.missing.length}`
+    : flightHint + "待筛选";
+  elements.flightTransferOutput.value = result.ready.join("\n");
+  return result;
+}
+
+function markFlightNumbers() {
+  if (activeBoard !== "inventory") return;
+  const result = updateFlightTransferPreview();
+  if (!result.flightNumber) {
+    showToast("请先填写航班号");
+    elements.flightNumberInput.focus();
+    return;
+  }
+  if (!result.ready.length) {
+    showToast(result.missing.length || result.duplicate.length ? "没有可上航班的新订单" : "请先输入要上航班的订单号");
+    return;
+  }
+
+  let target = state.batches.find(
+    (batch) => getBatchBoardType(batch) === "flight" && cleanUpper(batch.flightNumber) === result.flightNumber
+  );
+  const now = toInputDateTime(new Date());
+  const sourceByNumber = new Map();
+  state.batches
+    .filter((batch) => getBatchBoardType(batch) === "inventory")
+    .forEach((batch) => {
+      batch.numbers.forEach((number) => {
+        if (result.ready.includes(number)) sourceByNumber.set(number, batch);
+      });
+    });
+
+  if (!target) {
+    const firstSource = sourceByNumber.values().next().value;
+    const destination = firstSource?.destination || "US";
+    const stage = getStage("flight-departed") || getStage("flight-ready") || state.stages[0];
+    target = {
+      id: makeId(),
+      name: result.flightNumber,
+      flightNumber: result.flightNumber,
+      boardType: "flight",
+      count: 0,
+      destination,
+      origin: "CHINA",
+      stageKey: stage?.key || "",
+      createdAt: now,
+      numbers: [],
+      events: [
+        makeEvent(
+          stage?.key || "",
+          now,
+          stage?.type || "普通",
+          `${destination}: 已上航班 ${result.flightNumber}`,
+          false
+        ),
+      ],
+    };
+    state.batches.unshift(target);
+  }
+
+  target.numbers = uniqueValues([...(target.numbers || []), ...result.ready]);
+  target.count = target.numbers.length;
+  result.ready.forEach((number) => {
+    const source = sourceByNumber.get(number);
+    if (!source) return;
+    source.numbers = source.numbers.filter((item) => item !== number);
+    source.count = source.numbers.length;
+    source.flightTransfers = [
+      ...(source.flightTransfers || []),
+      { number, flightNumber: result.flightNumber, time: now, targetBatchId: target.id },
+    ];
+    syncBatchDerivedFields(source);
+  });
+  syncBatchDerivedFields(target);
+  selectedBatchId = target.id;
+  activeBoard = "flight";
+  saveState();
+  render();
+  showToast(`已将 ${result.ready.length} 单加入航班 ${result.flightNumber}`);
+}
+
+function copyFlightReadyNumbers() {
+  const { ready } = updateFlightTransferPreview();
+  if (!ready.length) {
+    showToast("没有可复制的可上航班单号");
+    return;
+  }
+  navigator.clipboard.writeText(ready.join("\n")).then(
+    () => showToast("可上航班单号已复制"),
+    () => showToast("复制失败，请手动复制")
+  );
+}
+
+function renderBoardControls() {
+  const isInventory = activeBoard === "inventory";
+  $("#board-title").textContent = isInventory ? "入库批次看板" : "航班批次看板";
+  $("#board-description").textContent = isInventory
+    ? "先导入入库批次，在这里维护入库轨迹，再将订单匹配到航班号。"
+    : "订单标记已上航班后，按航班号进入这里继续维护航班及后续轨迹。";
+  $$(".board-tab").forEach((tab) => tab.classList.toggle("active", tab.dataset.board === activeBoard));
+  elements.flightTransferPanel.hidden = !isInventory;
+  if (!isInventory) {
+    elements.flightTransferSummary.textContent = "切换到入库批次看板后可标记已上航班";
+    elements.flightTransferOutput.value = "";
   }
 }
 
 async function syncCollaborativeDiff(diff, updatedAt) {
-  if (diff.upserts.length) {
+  const rowsToUpsert = [
+    ...diff.upserts.map((item) => ({
+      id: item.id,
+      payload: item.payload,
+      updated_at: updatedAt,
+    })),
+    ...diff.deletes.map((id) => ({
+      id,
+      payload: { __deleted: true },
+      updated_at: updatedAt,
+    })),
+  ];
+
+  if (rowsToUpsert.length) {
     const response = await fetch(`${cloudConfig.url}/rest/v1/${encodeURIComponent(cloudConfig.table)}?on_conflict=id`, {
       method: "POST",
       headers: cloudHeaders({ prefer: "resolution=merge-duplicates,return=minimal" }),
-      body: JSON.stringify(
-        diff.upserts.map((item) => ({
-          id: item.id,
-          payload: item.payload,
-          updated_at: updatedAt,
-        }))
-      ),
+      body: JSON.stringify(rowsToUpsert),
     });
 
     if (!response.ok) {
@@ -1408,7 +1608,13 @@ async function syncCollaborativeDiff(diff, updatedAt) {
     }
   }
 
-  await deleteCloudRows(diff.deletes);
+  if (diff.deletes.length) {
+    try {
+      await deleteCloudRows(diff.deletes);
+    } catch {
+      // Tombstones already hide deleted rows from clients, so hard-delete cleanup is best effort.
+    }
+  }
 }
 
 function summarizeState(value) {
@@ -1818,6 +2024,14 @@ function switchView(viewName) {
   $(`#view-${viewName}`).classList.add("active-view");
 }
 
+function switchBoard(boardType) {
+  if (!["inventory", "flight"].includes(boardType)) return;
+  activeBoard = boardType;
+  const firstVisible = getVisibleBatches()[0];
+  selectedBatchId = firstVisible?.id ?? null;
+  render();
+}
+
 function makeEvent(stageKey, time, type, content, pushed) {
   return {
     id: makeId(),
@@ -1847,6 +2061,9 @@ function normalizeState(value) {
   const normalized = {
     stages,
     batches: Array.isArray(value?.batches) ? value.batches : [],
+    settings: {
+      activeFlightNumber: cleanUpper(value?.settings?.activeFlightNumber || ""),
+    },
     trash: {
       batches: Array.isArray(value?.trash?.batches)
         ? value.trash.batches.filter((item) => item?.data && !item.__deleted)
@@ -1918,6 +2135,14 @@ function renderTemplate(template, batch) {
 
 function getSelectedBatch() {
   return state.batches.find((batch) => batch.id === selectedBatchId) ?? null;
+}
+
+function getVisibleBatches() {
+  return state.batches.filter((batch) => getBatchBoardType(batch) === activeBoard);
+}
+
+function getBatchBoardType(batch) {
+  return batch?.boardType === "inventory" ? "inventory" : "flight";
 }
 
 function getStage(key) {

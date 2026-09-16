@@ -391,6 +391,31 @@ textarea:focus {
   padding: 18px;
 }
 
+.board-switcher {
+  display: inline-flex;
+  gap: 4px;
+  margin-top: 14px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.board-tab {
+  min-height: 34px;
+  border: 0;
+  border-radius: 6px;
+  padding: 0 14px;
+  background: transparent;
+  color: var(--muted);
+  font-weight: 800;
+}
+
+.board-tab.active {
+  color: #fff;
+  background: var(--primary);
+}
+
 .batch-list {
   margin-top: 14px;
   display: grid;
@@ -539,6 +564,26 @@ textarea:focus {
   border-radius: 8px;
   padding: 12px;
   background: var(--surface-soft);
+}
+
+.flight-transfer-panel {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  background: var(--accent-soft);
+}
+
+.flight-transfer-panel h3 {
+  margin: 0;
+}
+
+.flight-transfer-summary {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
 }
 
 .signed-update-panel h3 {

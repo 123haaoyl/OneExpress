@@ -55,6 +55,13 @@
               </label>
             </div>
             <label>
+              放入看板
+              <select id="batch-board-type">
+                <option value="inventory" selected>入库批次</option>
+                <option value="flight">航班批次</option>
+              </select>
+            </label>
+            <label>
               当前节点
               <select id="batch-stage"></select>
             </label>
@@ -94,10 +101,14 @@
             <section class="batch-list-panel">
               <div class="section-heading">
                 <div>
-                  <h2>批次看板</h2>
-                  <p>拖到卡片上半/下半可调整顺序，拖到卡片中间可合并，合并前会二次确认</p>
+                  <h2 id="board-title">入库批次看板</h2>
+                  <p id="board-description">先导入入库批次，在这里维护入库轨迹，再将订单匹配到航班号。</p>
                 </div>
                 <button class="secondary-button" id="split-batch-btn" type="button">拆分当前批次</button>
+              </div>
+              <div class="board-switcher" role="tablist" aria-label="批次看板类型">
+                <button class="board-tab active" data-board="inventory" type="button">入库批次</button>
+                <button class="board-tab" data-board="flight" type="button">航班批次</button>
               </div>
               <section class="locator-panel">
                 <div class="section-heading compact-heading">
@@ -110,6 +121,26 @@
                 <textarea id="locate-numbers-input" rows="4" placeholder="一行一个单号；可一次粘贴多条"></textarea>
                 <div class="locator-summary" id="locate-summary">待定位</div>
                 <div id="locate-results" class="locator-results"></div>
+              </section>
+              <section id="flight-transfer-panel" class="flight-transfer-panel">
+                <div class="section-heading compact-heading">
+                  <div>
+                    <h3>标记已上航班</h3>
+                    <p>预设航班号后，可分多次匹配入库订单并追加到同一个航班批次。</p>
+                  </div>
+                  <button class="secondary-button" id="filter-flight-transfer-btn" type="button">筛选订单</button>
+                </div>
+                <label>
+                  当前航班号
+                  <input id="flight-number-input" type="text" placeholder="如 CA123 / CZ327" />
+                </label>
+                <textarea id="flight-transfer-input" rows="4" placeholder="粘贴要上航班的订单号，一行一个"></textarea>
+                <div class="flight-transfer-summary" id="flight-transfer-summary">待筛选</div>
+                <div class="signed-update-actions">
+                  <button class="primary-button" id="mark-flight-btn" type="button">标记已上航班</button>
+                  <button class="secondary-button" id="copy-flight-ready-btn" type="button">复制可上航班单号</button>
+                </div>
+                <textarea id="flight-transfer-output" class="output-area" rows="4" readonly placeholder="筛选后的可上航班单号会显示在这里"></textarea>
               </section>
               <div class="merge-hint">拖到上半区或下半区调整顺序；拖到中间高亮区可合并。拆出去的子批状态一致后，也可以拖回原批次合并。</div>
               <div id="batch-list" class="batch-list"></div>
@@ -166,7 +197,7 @@
                   <textarea id="event-content" rows="2"></textarea>
                 </label>
 
-                <section class="signed-update-panel">
+                <section id="signed-update-panel" class="signed-update-panel">
                   <div class="section-heading">
                     <div>
                       <h3>已更新签收</h3>
